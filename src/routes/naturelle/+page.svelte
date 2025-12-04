@@ -1,19 +1,21 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
+	import { generateOrtImage, hasApiKey } from '$lib/services/geminiService';
 	import BekannterCard from '$lib/components/BekannterCard.svelte';
 	import { generiereBekanntenData, type GenerierterBekannter } from '$lib/data/merkmale';
+	import { STORAGE_KEYS, getStoredItem, setStoredItem } from '$lib/utils/storage';
+	import { toElementId } from '$lib/utils/slugify';
 
 	// Type definitions
 	type StimmungItem = string | { text: string; magisch?: boolean; trauma?: boolean };
 
-	// Generator State
-	let erlaubeMagisch = $state(true);
-	let erlaubeTrauma = $state(true);
-	let anzahlNaturelle = $state(3);
-	let anzahlBekannte = $state(2);
-	let aktiveKategorien = $state<string[]>(['Gemütlich', 'Lebendig', 'Verbindend', 'Weitläufig', 'Einsam', 'Verlassen']);
-
-	let generierterOrt = $state<{
+	interface GespeicherterOrt {
+		id: string;
 		name: string;
+		bilder?: string[];
+		hauptNaturell?: string;
+		anmerkungen?: string;
+		bekannte: GenerierterBekannter[];
 		naturelle: Array<{
 			name: string;
 			bild: string;
@@ -23,9 +25,202 @@
 			volkssagen: StimmungItem[];
 			kategorie: string;
 			farbe: string;
+			ortsnamen?: string[];
+			metaphorisch?: boolean;
 		}>;
-		bekannte: GenerierterBekannter[];
-	} | null>(null);
+		erstelltAm: string;
+	}
+
+	// Generator State
+	let erlaubeMagisch = $state(true);
+	let erlaubeTrauma = $state(true);
+	let anzahlNaturelle = $state(3);
+	let aktiveKategorien = $state<string[]>(['Gemütlich', 'Lebendig', 'Verbindend', 'Weitläufig', 'Einsam', 'Verlassen']);
+
+	let generierterOrt = $state<GespeicherterOrt | null>(null);
+	let gespeicherteOrte = $state<GespeicherterOrt[]>([]);
+	let bearbeitungsModus = $state(false);
+
+	// Image generation state
+	let isGeneratingImage = $state(false);
+	let imageError = $state<string | null>(null);
+	let showImageModal = $state(false);
+	let galerieIndex = $state(0);
+	let anmerkungenExpanded = $state(true);
+
+	// Bekannte state
+	let anzahlBekannte = $state(2);
+
+	// Debounce timer for anmerkungen
+	let anmerkungenSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Load saved places on mount
+	$effect(() => {
+		if (browser) {
+			const saved = getStoredItem<GespeicherterOrt[]>(STORAGE_KEYS.ORTE);
+			if (saved) {
+				gespeicherteOrte = saved;
+			}
+		}
+	});
+
+	function speichereOrte() {
+		setStoredItem(STORAGE_KEYS.ORTE, gespeicherteOrte);
+	}
+
+	// Auto-sync generierterOrt changes to gespeicherteOrte
+	function syncAktuellenOrt() {
+		if (!generierterOrt) return;
+		const existingIndex = gespeicherteOrte.findIndex(o => o.id === generierterOrt!.id);
+		if (existingIndex >= 0) {
+			gespeicherteOrte = gespeicherteOrte.map((o, i) =>
+				i === existingIndex ? generierterOrt! : o
+			);
+			speichereOrte();
+		}
+	}
+
+	function speichereAktuellenOrt() {
+		if (!generierterOrt) return;
+
+		// Check if already saved (update) or new
+		const existingIndex = gespeicherteOrte.findIndex(o => o.id === generierterOrt!.id);
+
+		if (existingIndex >= 0) {
+			// Update existing
+			gespeicherteOrte = gespeicherteOrte.map((o, i) =>
+				i === existingIndex ? generierterOrt! : o
+			);
+		} else {
+			// Add new
+			gespeicherteOrte = [...gespeicherteOrte, generierterOrt];
+		}
+
+		speichereOrte();
+		bearbeitungsModus = false;
+	}
+
+	function ladeOrt(ort: GespeicherterOrt) {
+		generierterOrt = { ...ort };
+		bearbeitungsModus = true;
+	}
+
+	function loescheOrt(id: string) {
+		gespeicherteOrte = gespeicherteOrte.filter(o => o.id !== id);
+		speichereOrte();
+		if (generierterOrt?.id === id) {
+			generierterOrt = null;
+			bearbeitungsModus = false;
+		}
+	}
+
+	function abbrechenBearbeitung() {
+		generierterOrt = null;
+		bearbeitungsModus = false;
+	}
+
+	function updateAnmerkungen(event: Event) {
+		if (!generierterOrt) return;
+		const target = event.target as HTMLTextAreaElement;
+		generierterOrt = { ...generierterOrt, anmerkungen: target.value };
+
+		// Debounced sync - save after 500ms of no typing
+		if (anmerkungenSyncTimer) clearTimeout(anmerkungenSyncTimer);
+		anmerkungenSyncTimer = setTimeout(() => syncAktuellenOrt(), 500);
+	}
+
+	async function generateImage() {
+		if (!generierterOrt || isGeneratingImage) return;
+
+		isGeneratingImage = true;
+		imageError = null;
+
+		try {
+			// Extract stimmung text from items (handle both string and object formats)
+			const extractStimmungText = (items: StimmungItem[]): string[] => {
+				return items.map(s => typeof s === 'string' ? s : s.text);
+			};
+
+			const imageData = await generateOrtImage({
+				name: generierterOrt.name,
+				hauptNaturell: generierterOrt.hauptNaturell || generierterOrt.naturelle[0]?.name || '',
+				naturelle: generierterOrt.naturelle.map(n => ({
+					name: n.name,
+					beschreibung: n.beschreibung,
+					metaphorisch: n.metaphorisch,
+					stimmung: extractStimmungText(n.stimmung)
+				})),
+				anmerkungen: generierterOrt.anmerkungen
+			});
+
+			if (imageData) {
+				const neueBilder = [...(generierterOrt.bilder || []), imageData];
+				generierterOrt = { ...generierterOrt, bilder: neueBilder };
+				galerieIndex = neueBilder.length - 1;
+				anmerkungenExpanded = false;
+				syncAktuellenOrt();
+			} else {
+				imageError = 'Kein Bild erhalten';
+			}
+		} catch (error) {
+			imageError = error instanceof Error ? error.message : 'Unbekannter Fehler';
+		} finally {
+			isGeneratingImage = false;
+		}
+	}
+
+	function removeImage(index: number) {
+		if (!generierterOrt?.bilder) return;
+		const neueBilder = generierterOrt.bilder.filter((_, i) => i !== index);
+		generierterOrt = { ...generierterOrt, bilder: neueBilder.length > 0 ? neueBilder : undefined };
+		if (galerieIndex >= neueBilder.length) {
+			galerieIndex = Math.max(0, neueBilder.length - 1);
+		}
+		syncAktuellenOrt();
+	}
+
+	function naechstesBild() {
+		if (!generierterOrt?.bilder) return;
+		galerieIndex = (galerieIndex + 1) % generierterOrt.bilder.length;
+	}
+
+	function vorherigesBild() {
+		if (!generierterOrt?.bilder) return;
+		galerieIndex = (galerieIndex - 1 + generierterOrt.bilder.length) % generierterOrt.bilder.length;
+	}
+
+	function toggleAnmerkungen() {
+		anmerkungenExpanded = !anmerkungenExpanded;
+	}
+
+	// Bekannte functions
+	function fuegeBekanntHinzu() {
+		if (!generierterOrt) return;
+		const neuerBekannter = generiereBekanntenData(erlaubeMagisch, erlaubeTrauma);
+		generierterOrt = {
+			...generierterOrt,
+			bekannte: [...generierterOrt.bekannte, neuerBekannter]
+		};
+		syncAktuellenOrt();
+	}
+
+	function entferneBekannten(index: number) {
+		if (!generierterOrt) return;
+		generierterOrt = {
+			...generierterOrt,
+			bekannte: generierterOrt.bekannte.filter((_, i) => i !== index)
+		};
+		syncAktuellenOrt();
+	}
+
+	function aktualisiereBekannten(index: number, updated: GenerierterBekannter) {
+		if (!generierterOrt) return;
+		generierterOrt = {
+			...generierterOrt,
+			bekannte: generierterOrt.bekannte.map((b, i) => i === index ? updated : b)
+		};
+		syncAktuellenOrt();
+	}
 
 	// Helper functions
 	function getRandomElement<T>(arr: T[]): T {
@@ -65,22 +260,45 @@
 		// Select random naturelle
 		const gewaehlteNaturelle = getRandomElements(alleNaturelle, anzahlNaturelle);
 
-		// Generate Bekannte with full data
-		const bekannte = Array.from({ length: anzahlBekannte }, () =>
-			generiereBekanntenData(erlaubeMagisch, erlaubeTrauma)
-		);
-
-		// Generate place name from one of the selected Naturelle
+		// Generate place name from one of the selected Naturelle and track which one
 		const naturellMitNamen = gewaehlteNaturelle.filter(n => n.ortsnamen && n.ortsnamen.length > 0);
-		const ortsname = naturellMitNamen.length > 0
-			? getRandomElement(getRandomElement(naturellMitNamen).ortsnamen)
-			: gewaehlteNaturelle[0].name;
+		let ortsname: string;
+		let hauptNaturell: string;
+
+		if (naturellMitNamen.length > 0) {
+			const gewaehlteNaturellFuerName = getRandomElement(naturellMitNamen);
+			ortsname = getRandomElement(gewaehlteNaturellFuerName.ortsnamen!);
+			hauptNaturell = gewaehlteNaturellFuerName.name;
+		} else {
+			ortsname = gewaehlteNaturelle[0].name;
+			hauptNaturell = gewaehlteNaturelle[0].name;
+		}
+
+		// Generate initial Bekannte
+		const initialeBekannte: GenerierterBekannter[] = [];
+		for (let i = 0; i < anzahlBekannte; i++) {
+			initialeBekannte.push(generiereBekanntenData(erlaubeMagisch, erlaubeTrauma));
+		}
+
+		// 50% Chance für jedes Naturell, metaphorisch zu sein
+		const naturelleMitMetaphorisch = gewaehlteNaturelle.map(n => ({
+			...n,
+			metaphorisch: Math.random() < 0.5
+		}));
 
 		generierterOrt = {
+			id: crypto.randomUUID(),
 			name: ortsname,
-			naturelle: gewaehlteNaturelle,
-			bekannte
+			hauptNaturell,
+			bekannte: initialeBekannte,
+			naturelle: naturelleMitMetaphorisch,
+			erstelltAm: new Date().toISOString()
 		};
+		bearbeitungsModus = false;
+
+		// Automatisch speichern
+		gespeicherteOrte = [...gespeicherteOrte, generierterOrt];
+		speichereOrte();
 	}
 
 	function toggleKategorie(name: string) {
@@ -93,31 +311,7 @@
 		}
 	}
 
-	function addBekannter() {
-		if (!generierterOrt) return;
-		const neuerBekannter = generiereBekanntenData(erlaubeMagisch, erlaubeTrauma);
-		generierterOrt = {
-			...generierterOrt,
-			bekannte: [...generierterOrt.bekannte, neuerBekannter]
-		};
-	}
-
-	function removeBekannter() {
-		if (!generierterOrt || generierterOrt.bekannte.length === 0) return;
-		generierterOrt = {
-			...generierterOrt,
-			bekannte: generierterOrt.bekannte.slice(0, -1)
-		};
-	}
-
-	function removeBekannterAt(index: number) {
-		if (!generierterOrt) return;
-		generierterOrt = {
-			...generierterOrt,
-			bekannte: generierterOrt.bekannte.filter((_, i) => i !== index)
-		};
-	}
-
+	
 	// Helper to get text from string or object format
 	function getText(item: StimmungItem): string {
 		return typeof item === 'string' ? item : item.text;
@@ -130,13 +324,7 @@
 	}
 
 	function scrollToNaturell(name: string) {
-		const id = name.toLowerCase()
-			.replace(/ü/g, 'ue')
-			.replace(/ä/g, 'ae')
-			.replace(/ö/g, 'oe')
-			.replace(/ß/g, 'ss')
-			.replace(/ /g, '-');
-		const element = document.getElementById(`naturell-${id}`);
+		const element = document.getElementById(`naturell-${toElementId(name)}`);
 		if (element) {
 			element.scrollIntoView({ behavior: 'smooth', block: 'start' });
 			element.classList.add('highlight');
@@ -679,6 +867,33 @@
 		Erschaffe einen Ort aus Naturellen und füge Bekannte hinzu, die dort leben.
 	</p>
 
+	<!-- Gespeicherte Orte -->
+	{#if gespeicherteOrte.length > 0}
+		<div class="gespeicherte-orte-section">
+			<h3>Gespeicherte Orte</h3>
+			<div class="gespeicherte-orte-liste">
+				{#each gespeicherteOrte as ort}
+					<div class="gespeicherter-ort-card">
+						<div class="ort-info">
+							<strong>{ort.name}</strong>
+							<span class="ort-meta">
+								{ort.naturelle.length} Naturelle, {ort.bekannte.length} Bekannte
+							</span>
+						</div>
+						<div class="ort-actions">
+							<button class="btn btn-sm btn-secondary" onclick={() => ladeOrt(ort)}>
+								Laden
+							</button>
+							<button class="btn btn-sm btn-danger" onclick={() => loescheOrt(ort.id)}>
+								Löschen
+							</button>
+						</div>
+					</div>
+				{/each}
+			</div>
+		</div>
+	{/if}
+
 	<!-- Generator Section -->
 	<div class="generator-row">
 		<button class="btn btn-primary generate-btn" onclick={generiereOrt}>
@@ -720,15 +935,103 @@
 
 	<!-- Generated Result -->
 	{#if generierterOrt}
-		<div class="result-section">
-			<h2 class="result-title">{generierterOrt.name}</h2>
+		<div class="result-section" class:bearbeitung={bearbeitungsModus}>
+			<!-- Header mit Name -->
+			<div class="result-header">
+				<h2 class="result-title">{generierterOrt.name}</h2>
+				{#if bearbeitungsModus}
+					<span class="bearbeitung-badge">Bearbeitung</span>
+				{/if}
+			</div>
 
+			<!-- Bild und Anmerkungen nebeneinander -->
+			<div class="bild-anmerkungen-row">
+				<!-- Bild-Bereich links -->
+				<div class="ort-image-section">
+					{#if generierterOrt.bilder && generierterOrt.bilder.length > 0}
+						<div class="ort-image-container">
+							<button class="ort-image-button" onclick={() => showImageModal = true} title="Bild vergrößern">
+								<img src={generierterOrt.bilder[galerieIndex]} alt={generierterOrt.name} class="ort-image" />
+							</button>
+							{#if generierterOrt.bilder.length > 1}
+								<div class="ort-image-counter">{galerieIndex + 1} / {generierterOrt.bilder.length}</div>
+							{/if}
+							<button
+								class="ort-regenerate-btn"
+								onclick={generateImage}
+								disabled={isGeneratingImage}
+								title="Neues Bild generieren"
+							>
+								{isGeneratingImage ? '⏳' : '🔄'}
+							</button>
+						</div>
+					{:else if hasApiKey()}
+						<button
+							class="ort-image-placeholder"
+							onclick={generateImage}
+							disabled={isGeneratingImage}
+							title="Klicken um Bild zu generieren"
+						>
+							{#if isGeneratingImage}
+								<span class="ort-placeholder-spinner"></span>
+								<span class="ort-placeholder-text">Generiere Bild...</span>
+							{:else}
+								<span class="ort-placeholder-icon">🏞️</span>
+								<span class="ort-placeholder-text">Bild generieren</span>
+							{/if}
+						</button>
+					{:else}
+						<div class="ort-image-placeholder-static">
+							<span class="ort-placeholder-icon">🏞️</span>
+							<a href="/einstellungen" class="ort-api-hint">API Key einrichten</a>
+						</div>
+					{/if}
+					{#if imageError}
+						<p class="ort-image-error">{imageError}</p>
+					{/if}
+				</div>
+
+				<!-- Anmerkungen rechts -->
+				<div class="anmerkungen-section" class:collapsed={!anmerkungenExpanded && generierterOrt.bilder?.length}>
+					<button class="anmerkungen-header" onclick={toggleAnmerkungen}>
+						<span class="anmerkungen-title">Anmerkungen</span>
+						<span class="anmerkungen-toggle">{anmerkungenExpanded ? '▼' : '▶'}</span>
+					</button>
+					{#if anmerkungenExpanded || !generierterOrt.bilder?.length}
+						<textarea
+							class="anmerkungen-textarea"
+							placeholder="Beschreibe Details für die Bildgenerierung..."
+							value={generierterOrt.anmerkungen || ''}
+							oninput={updateAnmerkungen}
+						></textarea>
+						{#if hasApiKey() && generierterOrt.bilder?.length}
+							<button
+								class="btn btn-sm anmerkungen-generate-btn"
+								onclick={generateImage}
+								disabled={isGeneratingImage}
+							>
+								{isGeneratingImage ? 'Generiere...' : 'Neues Bild generieren'}
+							</button>
+						{/if}
+					{/if}
+				</div>
+			</div>
+
+			<!-- Naturelle des Ortes -->
 			<div class="result-naturelle">
 				{#each generierterOrt.naturelle as nat}
-					<div class="result-naturell-card" data-farbe={nat.farbe}>
+					<div class="result-naturell-card" class:ist-haupt={nat.name === generierterOrt.hauptNaturell} data-farbe={nat.farbe}>
 						<img src={nat.bild} alt={nat.name} class="result-naturell-bild" />
 						<div class="result-naturell-info">
-							<h3>{nat.name}</h3>
+							<h3>
+								{nat.name}
+								{#if nat.name === generierterOrt.hauptNaturell}
+									<span class="haupt-tag">Haupt</span>
+								{/if}
+								{#if nat.metaphorisch}
+									<span class="metaphorisch-tag">Metaphorisch</span>
+								{/if}
+							</h3>
 							<p class="result-beschreibung">{nat.beschreibung}</p>
 							<div class="result-stimmung">
 								<strong>Stimmung:</strong>
@@ -738,37 +1041,105 @@
 									</span>
 								{/each}
 							</div>
+							<div class="result-kannImmer">
+								<strong>Hier kannst du immer:</strong>
+								<ul>
+									{#each nat.kannImmer as aktion}
+										<li>{aktion}</li>
+									{/each}
+								</ul>
+							</div>
 						</div>
 					</div>
 				{/each}
 			</div>
 
+			<!-- Bekannte des Ortes -->
 			<div class="result-bekannte">
 				<div class="bekannte-header">
-					<h3>Bekannte in {generierterOrt.name}</h3>
+					<h3>Bekannte an diesem Ort</h3>
 					<div class="bekannte-controls">
-						<button class="bekannte-ctrl-btn" onclick={removeBekannter} disabled={generierterOrt.bekannte.length === 0} title="Bekannte*n entfernen">−</button>
-						<span class="bekannte-count">{generierterOrt.bekannte.length}</span>
-						<button class="bekannte-ctrl-btn" onclick={addBekannter} title="Bekannte*n hinzufügen">+</button>
+						<button
+							class="bekannte-ctrl-btn"
+							onclick={() => entferneBekannten(generierterOrt!.bekannte.length - 1)}
+							disabled={!generierterOrt?.bekannte.length}
+							title="Letzten Bekannten entfernen"
+						>−</button>
+						<span class="bekannte-count">{generierterOrt?.bekannte.length || 0}</span>
+						<button
+							class="bekannte-ctrl-btn"
+							onclick={fuegeBekanntHinzu}
+							title="Bekannten hinzufügen"
+						>+</button>
 					</div>
 				</div>
-				{#if generierterOrt.bekannte.length > 0}
+
+				{#if generierterOrt?.bekannte.length}
+					<p class="bekannte-hint">Klicke auf einen Namen um ihn zu bearbeiten</p>
 					<div class="bekannte-list">
-						{#each generierterOrt.bekannte as b, i}
+						{#each generierterOrt.bekannte as bekannter, index}
 							<div class="bekannte-item">
-								<BekannterCard bekannter={b} />
-								<button class="bekannte-remove-btn" onclick={() => removeBekannterAt(i)} title="Entfernen">×</button>
+								<BekannterCard
+									{bekannter}
+									onUpdate={(updated) => aktualisiereBekannten(index, updated)}
+								/>
+								<button
+									class="bekannte-remove-btn"
+									onclick={() => entferneBekannten(index)}
+									title="Bekannten entfernen"
+								>×</button>
 							</div>
 						{/each}
 					</div>
 				{:else}
-					<p class="keine-bekannte">Keine Bekannte im Ort. Klicke +, um jemanden hinzuzufügen.</p>
+					<p class="keine-bekannte">Keine Bekannten an diesem Ort. Klicke +, um welche hinzuzufügen.</p>
 				{/if}
 			</div>
 
-			<button class="btn btn-secondary mt-md" onclick={generiereOrt}>
-				Neuen Ort erschaffen
-			</button>
+			<div class="result-actions">
+				{#if bearbeitungsModus}
+					<button class="btn btn-primary" onclick={speichereAktuellenOrt}>
+						Änderungen speichern
+					</button>
+				{/if}
+				<button class="btn btn-secondary" onclick={generiereOrt}>
+					Neuen Ort erschaffen
+				</button>
+				{#if bearbeitungsModus}
+					<button class="btn btn-outline" onclick={abbrechenBearbeitung}>
+						Abbrechen
+					</button>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Image Modal mit Galerie -->
+	{#if showImageModal && generierterOrt?.bilder?.length}
+		<div class="image-modal-overlay" onclick={() => showImageModal = false}>
+			<div class="image-modal-content" onclick={(e) => e.stopPropagation()}>
+				<img src={generierterOrt.bilder[galerieIndex]} alt={generierterOrt.name} class="modal-image" />
+
+				<!-- Navigation -->
+				{#if generierterOrt.bilder.length > 1}
+					<button class="modal-nav-btn modal-nav-prev" onclick={vorherigesBild} title="Vorheriges Bild">‹</button>
+					<button class="modal-nav-btn modal-nav-next" onclick={naechstesBild} title="Nächstes Bild">›</button>
+					<div class="modal-counter">{galerieIndex + 1} / {generierterOrt.bilder.length}</div>
+				{/if}
+
+				<!-- Aktionen -->
+				<div class="modal-actions">
+					<button class="modal-action-btn" onclick={() => { anmerkungenExpanded = true; showImageModal = false; }} title="Neues Bild generieren">
+						🔄 Neu generieren
+					</button>
+					<button class="modal-action-btn modal-action-delete" onclick={() => removeImage(galerieIndex)} title="Bild löschen">
+						🗑️ Löschen
+					</button>
+				</div>
+
+				<button class="modal-close-btn" onclick={() => showImageModal = false}>×</button>
+				<p class="modal-caption">{generierterOrt.name}</p>
+			</div>
 		</div>
 	{/if}
 
@@ -1040,11 +1411,11 @@
 	}
 
 	.result-title {
-		text-align: center;
 		font-family: var(--font-display);
 		font-size: 2rem;
-		margin-bottom: var(--space-lg);
+		margin: 0;
 		color: var(--color-earth-dark);
+		text-align: center;
 	}
 
 	.result-naturelle {
@@ -1068,6 +1439,14 @@
 	.result-naturell-card[data-farbe="grand"] { border-left-color: #9c7c38; }
 	.result-naturell-card[data-farbe="lonely"] { border-left-color: #8e7cc3; }
 	.result-naturell-card[data-farbe="desolate"] { border-left-color: #8b4513; }
+
+	/* Haupt-Naturell Hervorhebung */
+	.result-naturell-card.ist-haupt {
+		border-left-width: 8px;
+		border-left-color: #c9a227 !important;
+		background: linear-gradient(90deg, rgba(201, 162, 39, 0.12), var(--color-cream));
+		box-shadow: 0 2px 12px rgba(201, 162, 39, 0.25);
+	}
 
 	.result-naturell-bild {
 		width: 80px;
@@ -1461,6 +1840,564 @@
 	@media (min-width: 1200px) {
 		.naturelle-liste {
 			grid-template-columns: repeat(3, 1fr);
+		}
+	}
+
+	/* Gespeicherte Orte */
+	.gespeicherte-orte-section {
+		background: var(--color-parchment);
+		padding: var(--space-md);
+		border-radius: var(--radius-lg);
+		margin-bottom: var(--space-lg);
+		border: 2px solid var(--color-earth-light);
+	}
+
+	.gespeicherte-orte-section h3 {
+		margin: 0 0 var(--space-md) 0;
+		font-size: 1rem;
+		color: var(--color-earth-dark);
+	}
+
+	.gespeicherte-orte-liste {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-sm);
+	}
+
+	.gespeicherter-ort-card {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: var(--space-sm) var(--space-md);
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
+		border-left: 3px solid var(--color-leaf);
+	}
+
+	.ort-info {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.ort-meta {
+		font-size: 0.8rem;
+		color: var(--color-earth);
+	}
+
+	.ort-actions {
+		display: flex;
+		gap: var(--space-xs);
+	}
+
+	.btn-sm {
+		padding: var(--space-xs) var(--space-sm);
+		font-size: 0.8rem;
+	}
+
+	.btn-danger {
+		background: #dc3545;
+		color: white;
+		border: none;
+	}
+
+	.btn-danger:hover {
+		background: #c82333;
+	}
+
+	.btn-outline {
+		background: transparent;
+		border: 2px solid var(--color-earth);
+		color: var(--color-earth-dark);
+	}
+
+	.btn-outline:hover {
+		background: var(--color-earth-light);
+	}
+
+	/* Result Section Erweiterungen */
+	.result-header {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-md);
+		margin-bottom: var(--space-lg);
+		position: relative;
+	}
+
+	.result-section.bearbeitung {
+		border: 2px solid var(--color-leaf);
+	}
+
+	.bearbeitung-badge {
+		position: absolute;
+		top: 0;
+		right: 0;
+		background: var(--color-leaf);
+		color: white;
+		padding: var(--space-xs) var(--space-sm);
+		border-radius: var(--radius-md);
+		font-size: 0.8rem;
+		font-weight: 600;
+	}
+
+	.result-actions {
+		display: flex;
+		gap: var(--space-md);
+		margin-top: var(--space-lg);
+		flex-wrap: wrap;
+	}
+
+	.bekannte-hint {
+		font-size: 0.85rem;
+		color: var(--color-earth);
+		margin-bottom: var(--space-sm);
+		font-style: italic;
+	}
+
+	@media (max-width: 600px) {
+		.gespeicherter-ort-card {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: var(--space-sm);
+		}
+
+		.ort-actions {
+			width: 100%;
+		}
+
+		.ort-actions button {
+			flex: 1;
+		}
+	}
+
+	/* Ort Image Section - Compact Landscape */
+	.ort-image-section {
+		margin-bottom: var(--space-lg);
+	}
+
+	.ort-image-container {
+		position: relative;
+		width: 100%;
+		max-width: 500px;
+		margin: 0 auto;
+	}
+
+	.ort-image-button {
+		display: block;
+		width: 100%;
+		border: none;
+		background: none;
+		padding: 0;
+		cursor: pointer;
+		border-radius: var(--radius-md);
+		overflow: hidden;
+		transition: transform 0.2s ease, box-shadow 0.2s ease;
+	}
+
+	.ort-image-button:hover {
+		transform: scale(1.02);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+	}
+
+	.ort-image {
+		width: 100%;
+		height: auto;
+		aspect-ratio: 16 / 9;
+		object-fit: cover;
+		border-radius: var(--radius-md);
+		border: 3px solid var(--color-earth-light);
+	}
+
+	.ort-regenerate-btn {
+		position: absolute;
+		top: var(--space-sm);
+		right: var(--space-sm);
+		width: 36px;
+		height: 36px;
+		border: none;
+		border-radius: 50%;
+		background: rgba(255, 255, 255, 0.9);
+		color: var(--color-earth-dark);
+		font-size: 1.1rem;
+		cursor: pointer;
+		opacity: 0;
+		transition: all 0.2s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+	}
+
+	.ort-image-container:hover .ort-regenerate-btn {
+		opacity: 1;
+	}
+
+	.ort-regenerate-btn:hover {
+		background: white;
+		transform: scale(1.1);
+	}
+
+	.ort-regenerate-btn:disabled {
+		cursor: wait;
+	}
+
+	.ort-image-placeholder,
+	.ort-image-placeholder-static {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-xs);
+		width: 140px;
+		height: 105px;
+		background: linear-gradient(135deg, var(--color-cream), var(--color-earth-light));
+		border: 2px dashed var(--color-earth-light);
+		border-radius: var(--radius-md);
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+
+	.ort-image-placeholder:hover:not(:disabled) {
+		background: linear-gradient(135deg, var(--color-earth-light), var(--color-cream));
+		border-color: var(--color-earth);
+	}
+
+	.ort-image-placeholder:disabled {
+		cursor: wait;
+	}
+
+	.ort-image-placeholder-static {
+		cursor: default;
+	}
+
+	.ort-placeholder-icon {
+		font-size: 1.5rem;
+	}
+
+	.ort-placeholder-text {
+		font-size: 0.7rem;
+		color: var(--color-earth);
+		text-align: center;
+		padding: 0 var(--space-xs);
+	}
+
+	.ort-placeholder-spinner {
+		width: 24px;
+		height: 24px;
+		border: 3px solid var(--color-earth-light);
+		border-top-color: var(--color-leaf);
+		border-radius: 50%;
+		animation: spin 1s linear infinite;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	.ort-api-hint {
+		font-size: 0.85rem;
+		color: var(--color-leaf-dark);
+		text-decoration: underline;
+	}
+
+	.ort-image-error {
+		text-align: center;
+		color: #c0392b;
+		font-size: 0.9rem;
+		margin-top: var(--space-sm);
+	}
+
+	.haupt-tag {
+		display: inline-block;
+		background: linear-gradient(135deg, #c9a227, #9c7c38);
+		color: white;
+		padding: 3px 10px;
+		border-radius: var(--radius-sm);
+		font-size: 0.75rem;
+		font-weight: 700;
+		margin-left: var(--space-sm);
+		vertical-align: middle;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+	}
+
+	.metaphorisch-tag {
+		display: inline-block;
+		background: linear-gradient(135deg, #7b68ee, #9370db);
+		color: white;
+		padding: 3px 10px;
+		border-radius: var(--radius-sm);
+		font-size: 0.75rem;
+		font-weight: 700;
+		margin-left: var(--space-sm);
+		vertical-align: middle;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+	}
+
+	/* Bild + Anmerkungen Layout */
+	.bild-anmerkungen-row {
+		display: flex;
+		gap: var(--space-lg);
+		margin-bottom: var(--space-lg);
+		align-items: flex-start;
+	}
+
+	.bild-anmerkungen-row .ort-image-section {
+		flex-shrink: 0;
+		margin-bottom: 0;
+		width: auto;
+	}
+
+	.bild-anmerkungen-row .ort-image-container {
+		margin: 0;
+	}
+
+	.ort-image-counter {
+		position: absolute;
+		bottom: var(--space-sm);
+		left: 50%;
+		transform: translateX(-50%);
+		background: rgba(0, 0, 0, 0.6);
+		color: white;
+		padding: 2px 8px;
+		border-radius: var(--radius-sm);
+		font-size: 0.75rem;
+	}
+
+	/* Anmerkungen Section */
+	.anmerkungen-section {
+		flex: 1;
+		min-width: 200px;
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
+		border: 2px solid var(--color-earth-light);
+		overflow: hidden;
+		align-self: flex-start;
+	}
+
+	.anmerkungen-section.collapsed {
+		flex: 0 0 auto;
+		min-width: auto;
+		width: auto;
+	}
+
+	.anmerkungen-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		width: 100%;
+		padding: var(--space-sm) var(--space-md);
+		background: var(--color-earth-light);
+		border: none;
+		cursor: pointer;
+		font-family: inherit;
+		font-size: 0.9rem;
+		font-weight: 600;
+		color: var(--color-earth-dark);
+	}
+
+	.anmerkungen-header:hover {
+		background: var(--color-earth);
+		color: white;
+	}
+
+	.anmerkungen-toggle {
+		font-size: 0.8rem;
+	}
+
+	.anmerkungen-textarea {
+		width: 100%;
+		min-height: 80px;
+		padding: var(--space-sm);
+		border: none;
+		background: transparent;
+		font-family: inherit;
+		font-size: 0.9rem;
+		resize: vertical;
+	}
+
+	.anmerkungen-textarea:focus {
+		outline: none;
+	}
+
+	.anmerkungen-textarea::placeholder {
+		color: var(--color-earth);
+		font-style: italic;
+	}
+
+	.anmerkungen-generate-btn {
+		display: block;
+		width: calc(100% - var(--space-md));
+		margin: 0 auto var(--space-sm);
+	}
+
+	@media (max-width: 600px) {
+		.bild-anmerkungen-row {
+			flex-direction: column;
+		}
+
+		.bild-anmerkungen-row .ort-image-section {
+			width: 100%;
+		}
+
+		.anmerkungen-section {
+			width: 100%;
+		}
+	}
+
+	/* Image Modal mit Galerie */
+	.image-modal-overlay {
+		position: fixed;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		background: rgba(0, 0, 0, 0.9);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+		padding: var(--space-lg);
+		animation: fadeIn 0.2s ease;
+	}
+
+	.image-modal-content {
+		position: relative;
+		max-width: 90vw;
+		max-height: 90vh;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+
+	.modal-image {
+		max-width: 100%;
+		max-height: 70vh;
+		object-fit: contain;
+		border-radius: var(--radius-md);
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+	}
+
+	.modal-nav-btn {
+		position: absolute;
+		top: 50%;
+		transform: translateY(-50%);
+		width: 50px;
+		height: 50px;
+		border: none;
+		background: rgba(255, 255, 255, 0.9);
+		color: var(--color-earth-dark);
+		font-size: 2rem;
+		border-radius: 50%;
+		cursor: pointer;
+		transition: all 0.2s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.modal-nav-btn:hover {
+		background: white;
+		transform: translateY(-50%) scale(1.1);
+	}
+
+	.modal-nav-prev {
+		left: -70px;
+	}
+
+	.modal-nav-next {
+		right: -70px;
+	}
+
+	.modal-counter {
+		position: absolute;
+		top: -35px;
+		left: 50%;
+		transform: translateX(-50%);
+		background: rgba(255, 255, 255, 0.9);
+		color: var(--color-earth-dark);
+		padding: 4px 12px;
+		border-radius: var(--radius-md);
+		font-size: 0.9rem;
+		font-weight: 600;
+	}
+
+	.modal-actions {
+		display: flex;
+		gap: var(--space-md);
+		margin-top: var(--space-md);
+	}
+
+	.modal-action-btn {
+		padding: var(--space-sm) var(--space-md);
+		border: none;
+		background: rgba(255, 255, 255, 0.9);
+		color: var(--color-earth-dark);
+		border-radius: var(--radius-md);
+		cursor: pointer;
+		font-size: 0.9rem;
+		transition: all 0.2s ease;
+	}
+
+	.modal-action-btn:hover {
+		background: white;
+		transform: scale(1.05);
+	}
+
+	.modal-action-delete:hover {
+		background: #e74c3c;
+		color: white;
+	}
+
+	.modal-close-btn {
+		position: absolute;
+		top: -40px;
+		right: 0;
+		width: 36px;
+		height: 36px;
+		border: none;
+		background: rgba(255, 255, 255, 0.9);
+		color: var(--color-earth-dark);
+		font-size: 1.5rem;
+		border-radius: 50%;
+		cursor: pointer;
+		transition: all 0.2s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.modal-close-btn:hover {
+		background: white;
+		transform: scale(1.1);
+	}
+
+	.modal-caption {
+		margin-top: var(--space-md);
+		color: white;
+		font-family: var(--font-display);
+		font-size: 1.2rem;
+		text-align: center;
+	}
+
+	@media (max-width: 700px) {
+		.modal-nav-prev {
+			left: 10px;
+		}
+
+		.modal-nav-next {
+			right: 10px;
+		}
+
+		.modal-nav-btn {
+			width: 40px;
+			height: 40px;
+			font-size: 1.5rem;
+			background: rgba(255, 255, 255, 0.7);
 		}
 	}
 </style>

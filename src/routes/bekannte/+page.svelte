@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
 	import BekannterCard from '$lib/components/BekannterCard.svelte';
 	import {
 		generiereBekanntenData,
@@ -6,14 +7,37 @@
 		traumaKategorie,
 		type GenerierterBekannter
 	} from '$lib/data/merkmale';
+	import { STORAGE_KEYS, getStoredItem, setStoredItem } from '$lib/utils/storage';
 
 	// State
 	let erlaubeMagisch = $state(true);
 	let erlaubeTrauma = $state(true);
 	let generierterBekannter = $state<GenerierterBekannter | null>(null);
 
+	// Load from localStorage on mount
+	$effect(() => {
+		if (browser && !generierterBekannter) {
+			const saved = getStoredItem<GenerierterBekannter>(STORAGE_KEYS.CURRENT_BEKANNTER);
+			if (saved) {
+				generierterBekannter = saved;
+			}
+		}
+	});
+
 	function generiereBekannten() {
 		generierterBekannter = generiereBekanntenData(erlaubeMagisch, erlaubeTrauma);
+		saveToStorage(generierterBekannter);
+	}
+
+	function handleBekannterUpdate(updated: GenerierterBekannter) {
+		generierterBekannter = updated;
+		saveToStorage(updated);
+	}
+
+	function saveToStorage(bekannter: GenerierterBekannter | null) {
+		if (bekannter) {
+			setStoredItem(STORAGE_KEYS.CURRENT_BEKANNTER, bekannter);
+		}
 	}
 </script>
 
@@ -47,7 +71,7 @@
 
 	{#if generierterBekannter}
 		<div class="result-wrapper">
-			<BekannterCard bekannter={generierterBekannter} />
+			<BekannterCard bekannter={generierterBekannter} onUpdate={handleBekannterUpdate} />
 		</div>
 		<div class="result-footer">
 			<button class="btn btn-secondary" onclick={generiereBekannten}>

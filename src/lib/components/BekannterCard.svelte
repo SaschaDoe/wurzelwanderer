@@ -1,5 +1,7 @@
 <script lang="ts">
 	import type { GenerierterBekannter } from '$lib/data/merkmale';
+	import { generateBekannterImage, hasApiKey } from '$lib/services/geminiService';
+	import { kategorieToClass, germanSlugify } from '$lib/utils/slugify';
 
 	interface Props {
 		bekannter: GenerierterBekannter;
@@ -11,12 +13,9 @@
 
 	let { bekannter, compact = false, editable = false, onRemove, onUpdate }: Props = $props();
 
-	function getKategorieClass(kategorie: string): string {
-		return kategorie.toLowerCase()
-			.replace(/ö/g, 'oe')
-			.replace(/ü/g, 'ue')
-			.replace(/ä/g, 'ae');
-	}
+	let isGeneratingImage = $state(false);
+	let imageError = $state<string | null>(null);
+	let showImageModal = $state(false);
 
 	function getTierBezeichnung(tier: string, geschlecht: string): string {
 		if (geschlecht === 'weiblich') {
@@ -28,15 +27,6 @@
 	function getChimaereBezeichnung(): string {
 		if (!bekannter.chimaere) return '';
 		return `Oben: ${bekannter.chimaere.oben} / Unten: ${bekannter.chimaere.unten}`;
-	}
-
-	function getKlasseSlug(name: string): string {
-		return name.toLowerCase()
-			.replace(/\*/g, '')
-			.replace(/ü/g, 'ue')
-			.replace(/ä/g, 'ae')
-			.replace(/ö/g, 'oe')
-			.replace(/ß/g, 'ss');
 	}
 
 	function handleEdit(field: string, event: Event) {
@@ -82,18 +72,59 @@
 			(event.target as HTMLElement).blur();
 		}
 	}
+
+	async function generateImage() {
+		if (isGeneratingImage || !onUpdate) return;
+
+		isGeneratingImage = true;
+		imageError = null;
+
+		try {
+			const imageData = await generateBekannterImage({
+				name: bekannter.name,
+				tier: bekannter.tier,
+				berufe: bekannter.berufe,
+				merkmalName: bekannter.merkmal.name,
+				merkmalBeschreibung: bekannter.merkmal.beschreibung,
+				kategorie: bekannter.kategorie,
+				geschlecht: bekannter.geschlecht
+			});
+
+			if (imageData) {
+				const updated = { ...bekannter, bild: imageData };
+				onUpdate(updated);
+			} else {
+				imageError = 'Kein Bild erhalten';
+			}
+		} catch (error) {
+			imageError = error instanceof Error ? error.message : 'Unbekannter Fehler';
+		} finally {
+			isGeneratingImage = false;
+		}
+	}
+
+	function removeImage() {
+		if (!onUpdate) return;
+		const updated = { ...bekannter };
+		delete updated.bild;
+		onUpdate(updated);
+	}
 </script>
 
 {#if compact}
 	<!-- Compact card for lists -->
-	<div class="bekannte-card-compact" data-kategorie={getKategorieClass(bekannter.kategorie)}>
-		<div class="avatar" class:chimaere={bekannter.chimaere}>
-			{#if bekannter.chimaere}
-				<span class="chimaere-letters">{bekannter.chimaere.oben.charAt(0)} {bekannter.chimaere.unten.charAt(0)}</span>
-			{:else}
-				{bekannter.tier.charAt(0)}
-			{/if}
-		</div>
+	<div class="bekannte-card-compact" data-kategorie={kategorieToClass(bekannter.kategorie)}>
+		{#if bekannter.bild}
+			<img src={bekannter.bild} alt={bekannter.name} class="avatar-image" />
+		{:else}
+			<div class="avatar" class:chimaere={bekannter.chimaere}>
+				{#if bekannter.chimaere}
+					<span class="chimaere-letters">{bekannter.chimaere.oben.charAt(0)} {bekannter.chimaere.unten.charAt(0)}</span>
+				{:else}
+					{bekannter.tier.charAt(0)}
+				{/if}
+			</div>
+		{/if}
 		<div class="identity">
 			<span class="name">{bekannter.name}</span>
 			<span class="tier">
@@ -119,64 +150,93 @@
 	</div>
 {:else}
 	<!-- Full card with details -->
-	<div class="bekannte-card-full card" data-kategorie={getKategorieClass(bekannter.kategorie)} class:editable>
+	<div class="bekannte-card-full card" data-kategorie={kategorieToClass(bekannter.kategorie)}>
 		<header class="card-header">
-			<div class="avatar large" class:chimaere={bekannter.chimaere}>
-				{#if bekannter.chimaere}
-					<span class="chimaere-letters">{bekannter.chimaere.oben.charAt(0)} {bekannter.chimaere.unten.charAt(0)}</span>
+			<div class="image-area">
+				{#if bekannter.bild}
+					<button class="image-button" onclick={() => showImageModal = true} title="Bild vergrößern">
+						<img src={bekannter.bild} alt={bekannter.name} class="generated-image" />
+					</button>
+					{#if onUpdate}
+						<button class="remove-image-btn" onclick={removeImage} title="Bild entfernen">×</button>
+					{/if}
+				{:else if onUpdate && hasApiKey()}
+					<button
+						class="image-placeholder"
+						onclick={generateImage}
+						disabled={isGeneratingImage}
+						title="Klicken um Bild zu generieren"
+					>
+						{#if isGeneratingImage}
+							<span class="placeholder-spinner"></span>
+							<span class="placeholder-text">Generiere...</span>
+						{:else}
+							<span class="placeholder-icon">🎨</span>
+							<span class="placeholder-text">Bild generieren</span>
+						{/if}
+					</button>
 				{:else}
-					{bekannter.tier.charAt(0)}
+					<div class="image-placeholder-static">
+						<span class="placeholder-letter" class:chimaere={bekannter.chimaere}>
+							{#if bekannter.chimaere}
+								{bekannter.chimaere.oben.charAt(0)}{bekannter.chimaere.unten.charAt(0)}
+							{:else}
+								{bekannter.tier.charAt(0)}
+							{/if}
+						</span>
+					</div>
+				{/if}
+				{#if imageError}
+					<p class="image-error">{imageError}</p>
 				{/if}
 			</div>
-			<div class="identity">
+			<div class="header-info">
 				<h2
 					contenteditable={editable}
 					onblur={(e) => handleEdit('name', e)}
 					onkeydown={handleKeyDown}
 					class:editable-field={editable}
-					title={editable ? 'Doppelklick zum Bearbeiten' : ''}
 				>{bekannter.name}</h2>
 				{#if bekannter.chimaere}
-					<p class="chimaere-details">{getChimaereBezeichnung()}</p>
+					<p class="tier-text">{getChimaereBezeichnung()}</p>
 				{:else}
 					<p
-						class="tier"
+						class="tier-text"
 						contenteditable={editable}
 						onblur={(e) => handleEdit('tier', e)}
 						onkeydown={handleKeyDown}
 						class:editable-field={editable}
-						title={editable ? 'Doppelklick zum Bearbeiten' : ''}
 					>{getTierBezeichnung(bekannter.tier, bekannter.geschlecht)}</p>
 				{/if}
-			</div>
-			<div class="merkmal-badge" class:magisch={bekannter.merkmal.magisch} class:trauma={bekannter.merkmal.trauma}>
-				{#if bekannter.merkmal.magisch}
-					<span class="symbol">✧</span>
-				{/if}
-				{#if bekannter.merkmal.trauma}
-					<span class="symbol">‡</span>
-				{/if}
-				{bekannter.merkmal.name}
+				<div class="merkmal-row">
+					<span class="merkmal-badge" class:magisch={bekannter.merkmal.magisch} class:trauma={bekannter.merkmal.trauma}>
+						{#if bekannter.merkmal.magisch}
+							<span class="symbol">✧</span>
+						{/if}
+						{#if bekannter.merkmal.trauma}
+							<span class="symbol">‡</span>
+						{/if}
+						{bekannter.merkmal.name}
+					</span>
+					<span class="kategorie-tag">{bekannter.kategorie}</span>
+				</div>
 			</div>
 		</header>
 
 		<div class="card-body">
-			{#if bekannter.charakterKlasse}
-				<a href="/wurzelbuecher#{getKlasseSlug(bekannter.charakterKlasse.name)}" class="charakter-klasse-tag">
-					{bekannter.charakterKlasse.name}
-				</a>
-			{/if}
-
-			<div class="kategorie-tag">{bekannter.kategorie}es Merkmal</div>
-
 			<p
 				class="beschreibung"
 				contenteditable={editable}
 				onblur={(e) => handleEdit('beschreibung', e)}
 				onkeydown={handleKeyDown}
 				class:editable-field={editable}
-				title={editable ? 'Doppelklick zum Bearbeiten' : ''}
 			>{bekannter.merkmal.beschreibung}</p>
+
+			{#if bekannter.charakterKlasse}
+				<a href="/wurzelbuecher#{germanSlugify(bekannter.charakterKlasse.name)}" class="charakter-klasse-tag">
+					{bekannter.charakterKlasse.name}
+				</a>
+			{/if}
 
 			<div class="berufe-section">
 				<h4>Beruf{bekannter.berufe.length > 1 ? 'e' : ''}</h4>
@@ -211,6 +271,12 @@
 					{/each}
 				</ul>
 			</div>
+
+			{#if onUpdate && !hasApiKey()}
+				<p class="api-key-hint">
+					<a href="/einstellungen">API Key einrichten</a> um Bilder zu generieren.
+				</p>
+			{/if}
 
 			{#if bekannter.charakterKlasse}
 				<div class="charakter-klasse-section">
@@ -254,6 +320,17 @@
 	</div>
 {/if}
 
+<!-- Image Modal -->
+{#if showImageModal && bekannter.bild}
+	<div class="image-modal-overlay" onclick={() => showImageModal = false}>
+		<div class="image-modal-content" onclick={(e) => e.stopPropagation()}>
+			<img src={bekannter.bild} alt={bekannter.name} class="modal-image" />
+			<button class="modal-close-btn" onclick={() => showImageModal = false}>×</button>
+			<p class="modal-caption">{bekannter.name}</p>
+		</div>
+	</div>
+{/if}
+
 <style>
 	/* Compact card styles */
 	.bekannte-card-compact {
@@ -274,6 +351,15 @@
 	.bekannte-card-compact[data-kategorie="sozial"] { border-left-color: #ff9800; }
 	.bekannte-card-compact[data-kategorie="trauma"] { border-left-color: #8e7cc3; }
 
+	.avatar-image {
+		width: 40px;
+		height: 40px;
+		border-radius: 50%;
+		object-fit: cover;
+		flex-shrink: 0;
+		border: 2px solid var(--color-earth-light);
+	}
+
 	.avatar {
 		width: 40px;
 		height: 40px;
@@ -292,6 +378,142 @@
 		width: 60px;
 		height: 60px;
 		font-size: 1.5rem;
+	}
+
+	/* Image area styles */
+	.image-area {
+		position: relative;
+		width: 140px;
+		height: 190px;
+		flex-shrink: 0;
+	}
+
+	.image-button {
+		width: 100%;
+		height: 100%;
+		padding: 0;
+		border: none;
+		background: none;
+		cursor: zoom-in;
+		border-radius: var(--radius-lg);
+		overflow: hidden;
+		transition: transform 0.2s ease, box-shadow 0.2s ease;
+	}
+
+	.image-button:hover {
+		transform: scale(1.02);
+		box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+	}
+
+	.generated-image {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		border-radius: var(--radius-lg);
+		border: 3px solid var(--color-earth-light);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+	}
+
+	.image-placeholder,
+	.image-placeholder-static {
+		width: 100%;
+		height: 100%;
+		border-radius: var(--radius-lg);
+		border: 3px dashed var(--color-earth-light);
+		background: var(--color-cream);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-sm);
+	}
+
+	.image-placeholder {
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+
+	.image-placeholder:hover:not(:disabled) {
+		border-color: var(--color-leaf);
+		background: rgba(107, 142, 78, 0.1);
+	}
+
+	.image-placeholder:disabled {
+		cursor: wait;
+	}
+
+	.placeholder-icon {
+		font-size: 2rem;
+	}
+
+	.placeholder-text {
+		font-size: 0.8rem;
+		color: var(--color-earth);
+		font-weight: 500;
+		text-align: center;
+	}
+
+	.placeholder-letter {
+		font-size: 3rem;
+		font-weight: bold;
+		color: var(--color-earth);
+		text-transform: uppercase;
+		opacity: 0.5;
+	}
+
+	.placeholder-letter.chimaere {
+		font-size: 2rem;
+		background: linear-gradient(135deg, #9c7c38 50%, #c9a227 50%);
+		-webkit-background-clip: text;
+		-webkit-text-fill-color: transparent;
+		background-clip: text;
+	}
+
+	.placeholder-spinner {
+		width: 24px;
+		height: 24px;
+		border: 3px solid var(--color-earth-light);
+		border-top-color: var(--color-leaf);
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+	}
+
+	.image-error {
+		position: absolute;
+		bottom: -24px;
+		left: 0;
+		right: 0;
+		font-size: 0.75rem;
+		color: #dc3545;
+		text-align: center;
+		margin: 0;
+	}
+
+	.remove-image-btn {
+		position: absolute;
+		top: -8px;
+		right: -8px;
+		width: 24px;
+		height: 24px;
+		border: none;
+		border-radius: 50%;
+		background: #dc3545;
+		color: white;
+		font-size: 1.2rem;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		opacity: 0;
+		transition: opacity 0.2s ease;
+	}
+
+	.image-area:hover .remove-image-btn {
+		opacity: 1;
+	}
+
+	.remove-image-btn:hover {
+		background: #c82333;
 	}
 
 	.identity {
@@ -314,14 +536,6 @@
 		color: var(--color-earth);
 		font-style: italic;
 		margin: 0;
-	}
-
-	.chimaere-details {
-		font-size: 0.8rem;
-		color: #9c7c38;
-		margin: var(--space-xs) 0 0 0;
-		font-style: normal;
-		font-weight: 500;
 	}
 
 	.avatar.chimaere {
@@ -390,6 +604,7 @@
 		border-left: 4px solid var(--color-earth);
 		animation: fadeIn 0.3s ease;
 		height: 100%;
+		position: relative;
 	}
 
 	@keyframes fadeIn {
@@ -407,25 +622,47 @@
 
 	.card-header {
 		display: flex;
-		align-items: center;
-		gap: var(--space-md);
-		margin-bottom: var(--space-lg);
-		flex-wrap: wrap;
+		align-items: flex-start;
+		gap: var(--space-lg);
+		padding-bottom: var(--space-lg);
+		margin-bottom: var(--space-md);
+		border-bottom: 2px solid var(--color-earth-light);
 	}
 
-	.card-header .identity {
+	.header-info {
 		flex: 1;
 		min-width: 150px;
 	}
 
-	.card-header .identity h2 {
-		margin: 0;
-		font-size: 1.5rem;
+	.header-info h2 {
+		margin: 0 0 var(--space-xs) 0;
+		font-size: 1.4rem;
+		line-height: 1.2;
 	}
 
-	.card-header .merkmal-badge {
-		padding: var(--space-sm) var(--space-md);
-		border-radius: var(--radius-lg);
+	.tier-text {
+		font-size: 0.95rem;
+		color: var(--color-earth);
+		font-style: italic;
+		margin: 0 0 var(--space-md) 0;
+	}
+
+	.merkmal-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-sm);
+		flex-wrap: wrap;
+	}
+
+	.merkmal-row .merkmal-badge {
+		padding: var(--space-xs) var(--space-sm);
+		font-size: 0.85rem;
+	}
+
+	.merkmal-row .kategorie-tag {
+		padding: var(--space-xs) var(--space-sm);
+		font-size: 0.8rem;
+		margin: 0;
 	}
 
 	.card-body {
@@ -439,13 +676,13 @@
 		padding: var(--space-xs) var(--space-sm);
 		border-radius: var(--radius-sm);
 		font-size: 0.8rem;
-		margin-bottom: var(--space-md);
 	}
 
 	.beschreibung {
-		font-size: 1.1rem;
-		margin-bottom: var(--space-lg);
+		font-size: 1rem;
+		margin: 0 0 var(--space-lg) 0;
 		line-height: 1.6;
+		color: var(--color-earth-dark);
 	}
 
 	.berufe-section h4,
@@ -508,6 +745,24 @@
 	.aktionen-liste li {
 		margin-bottom: var(--space-sm);
 		line-height: 1.5;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	.api-key-hint {
+		font-size: 0.9rem;
+		color: var(--color-earth);
+		margin: var(--space-md) 0 0 0;
+		padding: var(--space-sm);
+		background: var(--color-cream);
+		border-radius: var(--radius-sm);
+	}
+
+	.api-key-hint a {
+		color: var(--color-leaf-dark);
+		font-weight: 600;
 	}
 
 	/* Charakter Klasse Section */
@@ -609,28 +864,21 @@
 		box-shadow: 0 0 0 2px var(--color-leaf-dark);
 	}
 
-	.bekannte-card-full.editable {
-		position: relative;
-	}
-
-	.bekannte-card-full.editable::before {
-		content: 'Doppelklick zum Bearbeiten';
-		position: absolute;
-		top: var(--space-sm);
-		right: var(--space-sm);
-		font-size: 0.75rem;
-		color: var(--color-earth);
-		opacity: 0.6;
-	}
-
 	@media (max-width: 600px) {
 		.card-header {
 			flex-direction: column;
-			align-items: flex-start;
+			align-items: center;
+			text-align: center;
 		}
 
-		.card-header .merkmal-badge {
-			align-self: flex-start;
+		.header-info {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+		}
+
+		.merkmal-row {
+			justify-content: center;
 		}
 
 		.bekannte-card-compact {
@@ -643,5 +891,68 @@
 			justify-content: center;
 			margin-top: var(--space-xs);
 		}
+
+		.image-area {
+			width: 120px;
+			height: 160px;
+		}
+	}
+
+	/* Image Modal Styles */
+	.image-modal-overlay {
+		position: fixed;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		background: rgba(0, 0, 0, 0.9);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+		padding: var(--space-lg);
+		cursor: zoom-out;
+	}
+
+	.image-modal-content {
+		position: relative;
+		max-width: 90vw;
+		max-height: 90vh;
+		cursor: default;
+	}
+
+	.modal-image {
+		max-width: 100%;
+		max-height: 85vh;
+		border-radius: var(--radius-lg);
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+	}
+
+	.modal-close-btn {
+		position: absolute;
+		top: -40px;
+		right: 0;
+		width: 36px;
+		height: 36px;
+		border: none;
+		border-radius: 50%;
+		background: rgba(255, 255, 255, 0.2);
+		color: white;
+		font-size: 1.5rem;
+		cursor: pointer;
+		transition: background 0.2s ease;
+	}
+
+	.modal-close-btn:hover {
+		background: rgba(255, 255, 255, 0.3);
+	}
+
+	.modal-caption {
+		text-align: center;
+		color: white;
+		font-family: var(--font-display);
+		font-size: 1.2rem;
+		margin-top: var(--space-md);
+		opacity: 0.9;
 	}
 </style>

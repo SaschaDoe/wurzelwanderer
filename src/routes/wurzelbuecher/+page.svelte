@@ -6,9 +6,8 @@
 		type CharakterKlasse
 	} from '$lib/data/merkmale';
 	import { browser } from '$app/environment';
-
-	// LocalStorage key
-	const STORAGE_KEY = 'wurzelwanderer-held';
+	import { STORAGE_KEYS, getStoredItem, setStoredItem, removeStoredItem } from '$lib/utils/storage';
+	import { germanSlugify } from '$lib/utils/slugify';
 
 	// State
 	let ausgewaehlteKlasse = $state<typeof charaktere[0] | null>(null);
@@ -18,13 +17,9 @@
 	// Load saved hero on mount
 	$effect(() => {
 		if (browser) {
-			const saved = localStorage.getItem(STORAGE_KEY);
+			const saved = getStoredItem<GenerierterBekannter>(STORAGE_KEYS.HELD);
 			if (saved) {
-				try {
-					gespeicherterHeld = JSON.parse(saved);
-				} catch (e) {
-					console.error('Fehler beim Laden des gespeicherten Helden:', e);
-				}
+				gespeicherterHeld = saved;
 			}
 		}
 	});
@@ -49,8 +44,8 @@
 	}
 
 	function speichereHeld() {
-		if (generierterHeld && browser) {
-			localStorage.setItem(STORAGE_KEY, JSON.stringify(generierterHeld));
+		if (generierterHeld) {
+			setStoredItem(STORAGE_KEYS.HELD, generierterHeld);
 			gespeicherterHeld = generierterHeld;
 			generierterHeld = null;
 			ausgewaehlteKlasse = null;
@@ -67,10 +62,8 @@
 	}
 
 	function loescheGespeichertenHeld() {
-		if (browser) {
-			localStorage.removeItem(STORAGE_KEY);
-			gespeicherterHeld = null;
-		}
+		removeStoredItem(STORAGE_KEYS.HELD);
+		gespeicherterHeld = null;
 	}
 
 	function handleHeldUpdate(updated: GenerierterBekannter) {
@@ -80,15 +73,6 @@
 	function abbrechenGenerieren() {
 		generierterHeld = null;
 		ausgewaehlteKlasse = null;
-	}
-
-	function getKlasseSlug(name: string): string {
-		return name.toLowerCase()
-			.replace(/\*/g, '')
-			.replace(/ü/g, 'ue')
-			.replace(/ä/g, 'ae')
-			.replace(/ö/g, 'oe')
-			.replace(/ß/g, 'ss');
 	}
 
 	const charaktere = [
@@ -222,7 +206,7 @@
 
 	<div class="charaktere-liste">
 		{#each charaktere as char}
-			<article class="charakter-card card" data-farbe={char.farbe} id={getKlasseSlug(char.name)}>
+			<article class="charakter-card card" data-farbe={char.farbe} id={germanSlugify(char.name)}>
 				<div class="char-image">
 					<img src={char.bild} alt={char.name} />
 				</div>
