@@ -22,6 +22,12 @@
 				<li><a href="/bekannte">Bekannte</a></li>
 				<li><a href="/jahreskreis">Jahreskreis</a></li>
 			</ul>
+			<a href="/einstellungen" class="settings-link" title="Einstellungen">
+				<svg class="gear-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<circle cx="12" cy="12" r="3"/>
+					<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+				</svg>
+			</a>
 		</nav>
 	</header>
 
@@ -48,6 +54,7 @@
 		background: var(--color-parchment);
 		border-bottom: 2px solid var(--color-earth-light);
 		padding: var(--space-md) 0;
+		position: relative;
 	}
 
 	nav {
@@ -96,6 +103,31 @@
 		text-decoration: none;
 	}
 
+	.settings-link {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		border-radius: 50%;
+		background: var(--color-earth-light);
+		color: var(--color-earth-dark);
+		transition: all 0.3s ease;
+		margin-left: var(--space-sm);
+	}
+
+	.settings-link:hover {
+		background: var(--color-earth);
+		color: var(--color-cream);
+		transform: rotate(90deg);
+		text-decoration: none;
+	}
+
+	.gear-icon {
+		width: 20px;
+		height: 20px;
+	}
+
 	main {
 		flex: 1;
 		padding: var(--space-xl) 0;
@@ -120,6 +152,12 @@
 
 		.nav-links {
 			justify-content: center;
+		}
+
+		.settings-link {
+			position: absolute;
+			top: var(--space-md);
+			right: var(--space-md);
 		}
 	}
 </style>

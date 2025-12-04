@@ -2,6 +2,7 @@
 	import { browser } from '$app/environment';
 	import { generateOrtImage, hasApiKey } from '$lib/services/geminiService';
 	import BekannterCard from '$lib/components/BekannterCard.svelte';
+	import ImageGalleryModal from '$lib/components/ImageGalleryModal.svelte';
 	import { generiereBekanntenData, type GenerierterBekannter } from '$lib/data/merkmale';
 	import { STORAGE_KEYS, getStoredItem, setStoredItem } from '$lib/utils/storage';
 	import { toElementId } from '$lib/utils/slugify';
@@ -1116,31 +1117,16 @@
 
 	<!-- Image Modal mit Galerie -->
 	{#if showImageModal && generierterOrt?.bilder?.length}
-		<div class="image-modal-overlay" onclick={() => showImageModal = false}>
-			<div class="image-modal-content" onclick={(e) => e.stopPropagation()}>
-				<img src={generierterOrt.bilder[galerieIndex]} alt={generierterOrt.name} class="modal-image" />
-
-				<!-- Navigation -->
-				{#if generierterOrt.bilder.length > 1}
-					<button class="modal-nav-btn modal-nav-prev" onclick={vorherigesBild} title="Vorheriges Bild">‹</button>
-					<button class="modal-nav-btn modal-nav-next" onclick={naechstesBild} title="Nächstes Bild">›</button>
-					<div class="modal-counter">{galerieIndex + 1} / {generierterOrt.bilder.length}</div>
-				{/if}
-
-				<!-- Aktionen -->
-				<div class="modal-actions">
-					<button class="modal-action-btn" onclick={() => { anmerkungenExpanded = true; showImageModal = false; }} title="Neues Bild generieren">
-						🔄 Neu generieren
-					</button>
-					<button class="modal-action-btn modal-action-delete" onclick={() => removeImage(galerieIndex)} title="Bild löschen">
-						🗑️ Löschen
-					</button>
-				</div>
-
-				<button class="modal-close-btn" onclick={() => showImageModal = false}>×</button>
-				<p class="modal-caption">{generierterOrt.name}</p>
-			</div>
-		</div>
+		<ImageGalleryModal
+			images={generierterOrt.bilder}
+			currentIndex={galerieIndex}
+			alt={generierterOrt.name}
+			caption={generierterOrt.name}
+			onClose={() => showImageModal = false}
+			onIndexChange={(i) => galerieIndex = i}
+			onRegenerate={() => anmerkungenExpanded = true}
+			onDelete={removeImage}
+		/>
 	{/if}
 
 	<div class="divider"></div>
@@ -2249,155 +2235,4 @@
 		}
 	}
 
-	/* Image Modal mit Galerie */
-	.image-modal-overlay {
-		position: fixed;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		background: rgba(0, 0, 0, 0.9);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-		padding: var(--space-lg);
-		animation: fadeIn 0.2s ease;
-	}
-
-	.image-modal-content {
-		position: relative;
-		max-width: 90vw;
-		max-height: 90vh;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-	}
-
-	.modal-image {
-		max-width: 100%;
-		max-height: 70vh;
-		object-fit: contain;
-		border-radius: var(--radius-md);
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-	}
-
-	.modal-nav-btn {
-		position: absolute;
-		top: 50%;
-		transform: translateY(-50%);
-		width: 50px;
-		height: 50px;
-		border: none;
-		background: rgba(255, 255, 255, 0.9);
-		color: var(--color-earth-dark);
-		font-size: 2rem;
-		border-radius: 50%;
-		cursor: pointer;
-		transition: all 0.2s ease;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.modal-nav-btn:hover {
-		background: white;
-		transform: translateY(-50%) scale(1.1);
-	}
-
-	.modal-nav-prev {
-		left: -70px;
-	}
-
-	.modal-nav-next {
-		right: -70px;
-	}
-
-	.modal-counter {
-		position: absolute;
-		top: -35px;
-		left: 50%;
-		transform: translateX(-50%);
-		background: rgba(255, 255, 255, 0.9);
-		color: var(--color-earth-dark);
-		padding: 4px 12px;
-		border-radius: var(--radius-md);
-		font-size: 0.9rem;
-		font-weight: 600;
-	}
-
-	.modal-actions {
-		display: flex;
-		gap: var(--space-md);
-		margin-top: var(--space-md);
-	}
-
-	.modal-action-btn {
-		padding: var(--space-sm) var(--space-md);
-		border: none;
-		background: rgba(255, 255, 255, 0.9);
-		color: var(--color-earth-dark);
-		border-radius: var(--radius-md);
-		cursor: pointer;
-		font-size: 0.9rem;
-		transition: all 0.2s ease;
-	}
-
-	.modal-action-btn:hover {
-		background: white;
-		transform: scale(1.05);
-	}
-
-	.modal-action-delete:hover {
-		background: #e74c3c;
-		color: white;
-	}
-
-	.modal-close-btn {
-		position: absolute;
-		top: -40px;
-		right: 0;
-		width: 36px;
-		height: 36px;
-		border: none;
-		background: rgba(255, 255, 255, 0.9);
-		color: var(--color-earth-dark);
-		font-size: 1.5rem;
-		border-radius: 50%;
-		cursor: pointer;
-		transition: all 0.2s ease;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.modal-close-btn:hover {
-		background: white;
-		transform: scale(1.1);
-	}
-
-	.modal-caption {
-		margin-top: var(--space-md);
-		color: white;
-		font-family: var(--font-display);
-		font-size: 1.2rem;
-		text-align: center;
-	}
-
-	@media (max-width: 700px) {
-		.modal-nav-prev {
-			left: 10px;
-		}
-
-		.modal-nav-next {
-			right: 10px;
-		}
-
-		.modal-nav-btn {
-			width: 40px;
-			height: 40px;
-			font-size: 1.5rem;
-			background: rgba(255, 255, 255, 0.7);
-		}
-	}
 </style>

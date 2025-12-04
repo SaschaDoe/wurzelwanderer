@@ -1,14 +1,5 @@
 import { STORAGE_KEYS, getStoredString, setStoredString, removeStoredItem } from '$lib/utils/storage';
-
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-const REQUEST_TIMEOUT_MS = 90000; // 90 Sekunden Timeout
-
-// Models to try in order (with fallback)
-// See: https://ai.google.dev/gemini-api/docs/image-generation
-const IMAGE_MODELS = [
-	'gemini-3-pro-image-preview', // "Nano Banana Pro" - state-of-the-art
-	'gemini-2.5-flash-image' // Fast "Nano Banana" - stable fallback
-];
+import { GEMINI_API_BASE, REQUEST_TIMEOUT_MS, IMAGE_MODELS } from '$lib/constants/api';
 
 // Get API key from environment or localStorage
 export function getApiKey(): string | null {

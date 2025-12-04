@@ -5,6 +5,7 @@
 	import ImageModal from './ImageModal.svelte';
 	import CharacterAvatar from './CharacterAvatar.svelte';
 	import CharacterImageArea from './CharacterImageArea.svelte';
+	import MerkmalBadge from './MerkmalBadge.svelte';
 
 	interface Props {
 		bekannter: GenerierterBekannter;
@@ -124,15 +125,11 @@
 				{/if}
 			</span>
 		</div>
-		<div class="merkmal-badge" class:magisch={bekannter.merkmal.magisch} class:trauma={bekannter.merkmal.trauma}>
-			{#if bekannter.merkmal.magisch}
-				<span class="symbol">✧</span>
-			{/if}
-			{#if bekannter.merkmal.trauma}
-				<span class="symbol">‡</span>
-			{/if}
-			{bekannter.merkmal.name}
-		</div>
+		<MerkmalBadge
+			name={bekannter.merkmal.name}
+			magisch={bekannter.merkmal.magisch}
+			trauma={bekannter.merkmal.trauma}
+		/>
 		{#if onRemove}
 			<button class="remove-btn" onclick={onRemove} title="Entfernen">×</button>
 		{/if}
@@ -171,15 +168,11 @@
 					>{getTierBezeichnung(bekannter.tier, bekannter.geschlecht)}</p>
 				{/if}
 				<div class="merkmal-row">
-					<span class="merkmal-badge" class:magisch={bekannter.merkmal.magisch} class:trauma={bekannter.merkmal.trauma}>
-						{#if bekannter.merkmal.magisch}
-							<span class="symbol">✧</span>
-						{/if}
-						{#if bekannter.merkmal.trauma}
-							<span class="symbol">‡</span>
-						{/if}
-						{bekannter.merkmal.name}
-					</span>
+					<MerkmalBadge
+						name={bekannter.merkmal.name}
+						magisch={bekannter.merkmal.magisch}
+						trauma={bekannter.merkmal.trauma}
+					/>
 					<span class="kategorie-tag">{bekannter.kategorie}</span>
 				</div>
 			</div>
@@ -337,34 +330,6 @@
 		margin: 0;
 	}
 
-	.merkmal-badge {
-		background: var(--color-parchment);
-		border: 2px solid var(--color-earth-light);
-		padding: var(--space-xs) var(--space-sm);
-		border-radius: var(--radius-md);
-		font-weight: 600;
-		font-size: 0.85rem;
-		display: flex;
-		align-items: center;
-		gap: var(--space-xs);
-		white-space: nowrap;
-	}
-
-	.merkmal-badge.magisch {
-		border-color: #c9a227;
-		background: linear-gradient(135deg, rgba(156, 124, 56, 0.1), rgba(201, 162, 39, 0.1));
-	}
-
-	.merkmal-badge.trauma {
-		border-color: #8e7cc3;
-		background: linear-gradient(135deg, rgba(142, 124, 195, 0.1), rgba(106, 90, 205, 0.1));
-	}
-
-	.symbol {
-		font-weight: bold;
-		font-size: 1rem;
-	}
-
 	.remove-btn {
 		width: 24px;
 		height: 24px;
@@ -437,11 +402,6 @@
 		align-items: center;
 		gap: var(--space-sm);
 		flex-wrap: wrap;
-	}
-
-	.merkmal-row .merkmal-badge {
-		padding: var(--space-xs) var(--space-sm);
-		font-size: 0.85rem;
 	}
 
 	.merkmal-row .kategorie-tag {
@@ -666,11 +626,5 @@
 			flex-wrap: wrap;
 		}
 
-		.bekannte-card-compact .merkmal-badge {
-			order: 4;
-			width: 100%;
-			justify-content: center;
-			margin-top: var(--space-xs);
-		}
 	}
 </style>

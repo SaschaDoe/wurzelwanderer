@@ -671,6 +671,7 @@ export interface GenerierterBekannter {
 	kategorie: string;
 	geschlecht: Geschlecht;
 	charakterKlasse?: CharakterKlasse; // Optional: für Spielercharaktere
+	bild?: string; // Optional: generiertes Bild als Base64 Data URL
 }
 
 export interface CharakterKlasse {
