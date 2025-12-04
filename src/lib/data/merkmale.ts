@@ -1,5 +1,7 @@
 // Shared Merkmal data for Bekannte generation
 
+import { getRandomElement } from "$lib/utils/random";
+
 export interface Merkmal {
 	name: string;
 	beschreibung: string;
@@ -686,10 +688,6 @@ export interface CharakterKlasse {
 	warnung?: string;
 }
 
-// Helper to get a random element
-export function getRandomElement<T>(arr: T[]): T {
-	return arr[Math.floor(Math.random() * arr.length)];
-}
 
 // Generate a Bekannter with full data
 export function generiereBekanntenData(erlaubeMagisch: boolean, erlaubeTrauma: boolean): GenerierterBekannter {

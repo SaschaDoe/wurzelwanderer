@@ -6,6 +6,7 @@
 	import { generiereBekanntenData, type GenerierterBekannter } from '$lib/data/merkmale';
 	import { STORAGE_KEYS, getStoredItem, setStoredItem } from '$lib/utils/storage';
 	import { toElementId } from '$lib/utils/slugify';
+	import { getRandomElement, getRandomElements } from '$lib/utils/random';
 	import {
 		kategorien,
 		getStimmungText as getText,
@@ -228,17 +229,6 @@
 		};
 		syncAktuellenOrt();
 	}
-
-	// Helper functions
-	function getRandomElement<T>(arr: T[]): T {
-		return arr[Math.floor(Math.random() * arr.length)];
-	}
-
-	function getRandomElements<T>(arr: T[], count: number): T[] {
-		const shuffled = [...arr].sort(() => Math.random() - 0.5);
-		return shuffled.slice(0, Math.min(count, arr.length));
-	}
-
 
 	function generiereOrt() {
 		// Filter categories by active selection
