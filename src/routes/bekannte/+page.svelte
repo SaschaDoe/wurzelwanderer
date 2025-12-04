@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { browser } from '$app/environment';
+	import { onMount } from 'svelte';
 	import BekannterCard from '$lib/components/BekannterCard.svelte';
 	import {
 		generiereBekanntenData,
@@ -14,13 +14,11 @@
 	let erlaubeTrauma = $state(true);
 	let generierterBekannter = $state<GenerierterBekannter | null>(null);
 
-	// Load from localStorage on mount
-	$effect(() => {
-		if (browser && !generierterBekannter) {
-			const saved = getStoredItem<GenerierterBekannter>(STORAGE_KEYS.CURRENT_BEKANNTER);
-			if (saved) {
-				generierterBekannter = saved;
-			}
+	// Load from IndexedDB on mount
+	onMount(async () => {
+		const saved = await getStoredItem<GenerierterBekannter>(STORAGE_KEYS.CURRENT_BEKANNTER);
+		if (saved) {
+			generierterBekannter = saved;
 		}
 	});
 

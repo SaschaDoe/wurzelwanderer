@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import BekannterCard from '$lib/components/BekannterCard.svelte';
 	import {
 		generiereBekanntenData,
@@ -6,7 +7,6 @@
 		type CharakterKlasse
 	} from '$lib/data/merkmale';
 	import { charaktere, type CharakterKlasseData } from '$lib/data/charaktere';
-	import { browser } from '$app/environment';
 	import { STORAGE_KEYS, getStoredItem, setStoredItem, removeStoredItem } from '$lib/utils/storage';
 	import { germanSlugify } from '$lib/utils/slugify';
 
@@ -16,12 +16,10 @@
 	let gespeicherterHeld = $state<GenerierterBekannter | null>(null);
 
 	// Load saved hero on mount
-	$effect(() => {
-		if (browser) {
-			const saved = getStoredItem<GenerierterBekannter>(STORAGE_KEYS.HELD);
-			if (saved) {
-				gespeicherterHeld = saved;
-			}
+	onMount(async () => {
+		const saved = await getStoredItem<GenerierterBekannter>(STORAGE_KEYS.HELD);
+		if (saved) {
+			gespeicherterHeld = saved;
 		}
 	});
 

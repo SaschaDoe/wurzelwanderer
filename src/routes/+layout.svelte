@@ -20,6 +20,7 @@
 				<li><a href="/wurzelbuecher">Charaktere</a></li>
 				<li><a href="/naturelle">Naturelle</a></li>
 				<li><a href="/bekannte">Bekannte</a></li>
+				<li><a href="/bildband">Bildband</a></li>
 				<li><a href="/jahreskreis">Jahreskreis</a></li>
 			</ul>
 			<a href="/einstellungen" class="settings-link" title="Einstellungen">

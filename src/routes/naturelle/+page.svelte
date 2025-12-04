@@ -1,10 +1,12 @@
 <script lang="ts">
-	import { browser } from '$app/environment';
-	import { generateOrtImage, hasApiKey } from '$lib/services/geminiService';
+	import { onMount } from 'svelte';
+	import { generateSceneDescription, generateImageFromPrompt, hasApiKey, initApiKey, type RegionInfo, type SceneGenerationResult } from '$lib/services/geminiService';
 	import BekannterCard from '$lib/components/BekannterCard.svelte';
 	import ImageGalleryModal from '$lib/components/ImageGalleryModal.svelte';
+	import RegionCard from '$lib/components/RegionCard.svelte';
+	import RegionEditor from '$lib/components/RegionEditor.svelte';
 	import { generiereBekanntenData, type GenerierterBekannter } from '$lib/data/merkmale';
-	import { STORAGE_KEYS, getStoredItem, setStoredItem } from '$lib/utils/storage';
+	import { STORAGE_KEYS, getStoredItem, setStoredItem, getStoredString, setStoredString } from '$lib/utils/storage';
 	import { toElementId } from '$lib/utils/slugify';
 	import { getRandomElement, getRandomElements } from '$lib/utils/random';
 	import {
@@ -14,15 +16,24 @@
 		isTrauma,
 		type StimmungItem
 	} from '$lib/data/naturelle';
+	import {
+		type GespeicherteRegion,
+		type Besonderheit,
+		HEIMATGEFILDE,
+		HEIMATGEFILDE_ID,
+		generiereZufaelligeRegion
+	} from '$lib/data/regionen';
 
 	// Type definitions
 
 	interface GespeicherterOrt {
 		id: string;
+		regionId: string;
 		name: string;
 		bilder?: string[];
 		hauptNaturell?: string;
 		anmerkungen?: string;
+		szenenBeschreibung?: string;
 		bekannte: GenerierterBekannter[];
 		naturelle: Array<{
 			name: string;
@@ -49,8 +60,22 @@
 	let gespeicherteOrte = $state<GespeicherterOrt[]>([]);
 	let bearbeitungsModus = $state(false);
 
+	// Region State
+	let regionen = $state<GespeicherteRegion[]>([]);
+	let aktiveRegionId = $state<string>(HEIMATGEFILDE_ID);
+	let showRegionEditor = $state(false);
+	let bearbeiteteRegion = $state<GespeicherteRegion | null>(null);
+
+	// Derived: Aktive Region
+	let aktiveRegion = $derived(regionen.find(r => r.id === aktiveRegionId) || HEIMATGEFILDE);
+
+	// Derived: Orte der aktiven Region
+	let orteInAktiverRegion = $derived(gespeicherteOrte.filter(o => o.regionId === aktiveRegionId));
+
 	// Image generation state
 	let isGeneratingImage = $state(false);
+	let generationPhase = $state<'scene' | 'image' | null>(null);
+	let sceneDescription = $state<string | null>(null);
 	let imageError = $state<string | null>(null);
 	let showImageModal = $state(false);
 	let galerieIndex = $state(0);
@@ -62,18 +87,134 @@
 	// Debounce timer for anmerkungen
 	let anmerkungenSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
-	// Load saved places on mount
-	$effect(() => {
-		if (browser) {
-			const saved = getStoredItem<GespeicherterOrt[]>(STORAGE_KEYS.ORTE);
-			if (saved) {
-				gespeicherteOrte = saved;
+	// Load saved data on mount with migration
+	onMount(async () => {
+		// Initialize API key cache for hasApiKey() to work synchronously
+		await initApiKey();
+
+		// Load regions
+		const savedRegionen = await getStoredItem<GespeicherteRegion[]>(STORAGE_KEYS.REGIONEN);
+		let loadedRegionen: GespeicherteRegion[];
+		if (savedRegionen && savedRegionen.length > 0) {
+			// Ensure Heimatgefilde exists
+			const hasHeimat = savedRegionen.some(r => r.id === HEIMATGEFILDE_ID);
+			loadedRegionen = hasHeimat ? savedRegionen : [HEIMATGEFILDE, ...savedRegionen];
+		} else {
+			loadedRegionen = [HEIMATGEFILDE];
+		}
+		regionen = loadedRegionen;
+
+		// Load active region
+		const savedAktiveRegion = await getStoredString(STORAGE_KEYS.AKTIVE_REGION);
+		if (savedAktiveRegion && loadedRegionen.some(r => r.id === savedAktiveRegion)) {
+			aktiveRegionId = savedAktiveRegion;
+		} else {
+			aktiveRegionId = HEIMATGEFILDE_ID;
+		}
+
+		// Load orte
+		const saved = await getStoredItem<GespeicherterOrt[]>(STORAGE_KEYS.ORTE);
+		if (saved) {
+			// Migration: assign regionId to orte that don't have one
+			const migratedOrte = saved.map(ort => ({
+				...ort,
+				regionId: ort.regionId || HEIMATGEFILDE_ID
+			}));
+			gespeicherteOrte = migratedOrte;
+
+			// Save migrated data if needed
+			if (saved.some(ort => !ort.regionId)) {
+				await setStoredItem(STORAGE_KEYS.ORTE, migratedOrte);
 			}
 		}
 	});
 
 	function speichereOrte() {
 		setStoredItem(STORAGE_KEYS.ORTE, gespeicherteOrte);
+	}
+
+	function speichereRegionen() {
+		setStoredItem(STORAGE_KEYS.REGIONEN, regionen);
+	}
+
+	function speichereAktiveRegion() {
+		setStoredString(STORAGE_KEYS.AKTIVE_REGION, aktiveRegionId);
+	}
+
+	// Region management functions
+	function setAktiveRegion(regionId: string) {
+		aktiveRegionId = regionId;
+		speichereAktiveRegion();
+		// Clear current ort when switching regions
+		generierterOrt = null;
+		bearbeitungsModus = false;
+	}
+
+	function oeffneRegionEditor(region?: GespeicherteRegion) {
+		bearbeiteteRegion = region || null;
+		showRegionEditor = true;
+	}
+
+	function speichereRegion(region: GespeicherteRegion) {
+		const existingIndex = regionen.findIndex(r => r.id === region.id);
+		if (existingIndex >= 0) {
+			regionen = regionen.map((r, i) => i === existingIndex ? region : r);
+		} else {
+			regionen = [...regionen, region];
+		}
+		speichereRegionen();
+		showRegionEditor = false;
+		bearbeiteteRegion = null;
+
+		// Activate the new/edited region
+		setAktiveRegion(region.id);
+	}
+
+	function loescheRegion(regionId: string) {
+		// Don't delete Heimatgefilde
+		const region = regionen.find(r => r.id === regionId);
+		if (!region || region.istHeimat) return;
+
+		// Move all orte in this region to Heimatgefilde
+		gespeicherteOrte = gespeicherteOrte.map(ort =>
+			ort.regionId === regionId ? { ...ort, regionId: HEIMATGEFILDE_ID } : ort
+		);
+		speichereOrte();
+
+		// Remove the region
+		regionen = regionen.filter(r => r.id !== regionId);
+		speichereRegionen();
+
+		// Switch to Heimatgefilde if we deleted the active region
+		if (aktiveRegionId === regionId) {
+			setAktiveRegion(HEIMATGEFILDE_ID);
+		}
+	}
+
+	function generiereNeueRegion() {
+		const neueRegion = generiereZufaelligeRegion();
+		regionen = [...regionen, neueRegion];
+		speichereRegionen();
+		setAktiveRegion(neueRegion.id);
+	}
+
+	// Helper: Get region info for image generation
+	function getRegionInfoForImage(): RegionInfo | undefined {
+		if (!aktiveRegion || aktiveRegion.istHeimat) return undefined;
+		if (aktiveRegion.geographisch.length === 0 && aktiveRegion.faunaFlora.length === 0 && !aktiveRegion.architektur) {
+			return undefined;
+		}
+		return {
+			name: aktiveRegion.name,
+			geographisch: aktiveRegion.geographisch.map(b => ({ name: b.name, promptText: b.promptText })),
+			faunaFlora: aktiveRegion.faunaFlora.map(b => ({ name: b.name, promptText: b.promptText })),
+			architektur: aktiveRegion.architektur ? { name: aktiveRegion.architektur.name, promptText: aktiveRegion.architektur.promptText } : undefined
+		};
+	}
+
+	// Helper: Count orte per region
+	function getOrteCount(regionId: string): number {
+		return gespeicherteOrte.filter(o => o.regionId === regionId).length;
 	}
 
 	// Auto-sync generierterOrt changes to gespeicherteOrte
@@ -109,6 +250,11 @@
 	}
 
 	function ladeOrt(ort: GespeicherterOrt) {
+		// Reset image states
+		imageError = null;
+		sceneDescription = ort.szenenBeschreibung || null;
+		galerieIndex = 0;
+
 		generierterOrt = { ...ort };
 		bearbeitungsModus = true;
 	}
@@ -142,6 +288,8 @@
 
 		isGeneratingImage = true;
 		imageError = null;
+		sceneDescription = null;
+		generationPhase = 'scene';
 
 		try {
 			// Extract stimmung text from items (handle both string and object formats)
@@ -149,7 +297,7 @@
 				return items.map(s => typeof s === 'string' ? s : s.text);
 			};
 
-			const imageData = await generateOrtImage({
+			const ortInfo = {
 				name: generierterOrt.name,
 				hauptNaturell: generierterOrt.hauptNaturell || generierterOrt.naturelle[0]?.name || '',
 				naturelle: generierterOrt.naturelle.map(n => ({
@@ -158,12 +306,21 @@
 					metaphorisch: n.metaphorisch,
 					stimmung: extractStimmungText(n.stimmung)
 				})),
-				anmerkungen: generierterOrt.anmerkungen
-			});
+				anmerkungen: generierterOrt.anmerkungen,
+				region: getRegionInfoForImage()
+			};
+
+			// Phase 1: Generate scene description with LLM
+			const sceneResult = await generateSceneDescription(ortInfo);
+			sceneDescription = sceneResult.sceneDescription;
+
+			// Phase 2: Generate image from scene prompt
+			generationPhase = 'image';
+			const imageData = await generateImageFromPrompt(sceneResult.promptForImage, generierterOrt.name);
 
 			if (imageData) {
 				const neueBilder = [...(generierterOrt.bilder || []), imageData];
-				generierterOrt = { ...generierterOrt, bilder: neueBilder };
+				generierterOrt = { ...generierterOrt, bilder: neueBilder, szenenBeschreibung: sceneDescription || undefined };
 				galerieIndex = neueBilder.length - 1;
 				anmerkungenExpanded = false;
 				syncAktuellenOrt();
@@ -174,6 +331,7 @@
 			imageError = error instanceof Error ? error.message : 'Unbekannter Fehler';
 		} finally {
 			isGeneratingImage = false;
+			generationPhase = null;
 		}
 	}
 
@@ -231,6 +389,11 @@
 	}
 
 	function generiereOrt() {
+		// Reset image states
+		imageError = null;
+		sceneDescription = null;
+		galerieIndex = 0;
+
 		// Filter categories by active selection
 		const aktiveKats = kategorien.filter(k => aktiveKategorien.includes(k.name));
 		if (aktiveKats.length === 0) return;
@@ -285,6 +448,7 @@
 
 		generierterOrt = {
 			id: crypto.randomUUID(),
+			regionId: aktiveRegionId,
 			name: ortsname,
 			hauptNaturell,
 			bekannte: initialeBekannte,
@@ -327,15 +491,73 @@
 <div class="container">
 	<h1>Ort erschaffen</h1>
 	<p class="intro">
-		Erschaffe einen Ort aus Naturellen und füge Bekannte hinzu, die dort leben.
+		Wähle eine Region und erschaffe Orte aus Naturellen.
 	</p>
 
-	<!-- Gespeicherte Orte -->
-	{#if gespeicherteOrte.length > 0}
+	<!-- Region Management Section -->
+	<div class="regionen-section">
+		<div class="regionen-header">
+			<h3>Regionen</h3>
+			<div class="regionen-actions">
+				<button class="btn btn-sm btn-secondary" onclick={generiereNeueRegion}>
+					Zufällige Region
+				</button>
+				<button class="btn btn-sm btn-primary" onclick={() => oeffneRegionEditor()}>
+					Neue Region
+				</button>
+			</div>
+		</div>
+		<div class="regionen-liste">
+			{#each regionen as region}
+				<RegionCard
+					{region}
+					orteCount={getOrteCount(region.id)}
+					isActive={region.id === aktiveRegionId}
+					onSelect={() => setAktiveRegion(region.id)}
+					onEdit={() => oeffneRegionEditor(region)}
+					onDelete={() => loescheRegion(region.id)}
+				/>
+			{/each}
+		</div>
+	</div>
+
+	<!-- Aktive Region Info -->
+	{#if aktiveRegion && !aktiveRegion.istHeimat}
+		<div class="aktive-region-info">
+			<h4>{aktiveRegion.name}</h4>
+			<div class="region-besonderheiten">
+				{#if aktiveRegion.geographisch.length > 0}
+					<div class="besonderheit-gruppe">
+						<span class="besonderheit-label">Geographie:</span>
+						{#each aktiveRegion.geographisch as b}
+							<span class="besonderheit-tag geo">{b.name}</span>
+						{/each}
+					</div>
+				{/if}
+				{#if aktiveRegion.faunaFlora.length > 0}
+					<div class="besonderheit-gruppe">
+						<span class="besonderheit-label">Flora & Fauna:</span>
+						{#each aktiveRegion.faunaFlora as b}
+							<span class="besonderheit-tag flora">{b.name}</span>
+						{/each}
+					</div>
+				{/if}
+				{#if aktiveRegion.architektur}
+					<div class="besonderheit-gruppe">
+						<span class="besonderheit-label">Architektur:</span>
+						<span class="besonderheit-tag arch">{aktiveRegion.architektur.name}</span>
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Gespeicherte Orte der aktiven Region -->
+	{#if orteInAktiverRegion.length > 0}
 		<div class="gespeicherte-orte-section">
-			<h3>Gespeicherte Orte</h3>
+			<h3>Orte in {aktiveRegion.name}</h3>
 			<div class="gespeicherte-orte-liste">
-				{#each gespeicherteOrte as ort}
+				{#each orteInAktiverRegion as ort}
 					<div class="gespeicherter-ort-card">
 						<div class="ort-info">
 							<strong>{ort.name}</strong>
@@ -437,7 +659,15 @@
 						>
 							{#if isGeneratingImage}
 								<span class="ort-placeholder-spinner"></span>
-								<span class="ort-placeholder-text">Generiere Bild...</span>
+								<span class="ort-placeholder-text">
+									{#if generationPhase === 'scene'}
+										Szene wird erdacht...
+									{:else if generationPhase === 'image'}
+										Bild wird generiert...
+									{:else}
+										Generiere...
+									{/if}
+								</span>
 							{:else}
 								<span class="ort-placeholder-icon">🏞️</span>
 								<span class="ort-placeholder-text">Bild generieren</span>
@@ -452,30 +682,33 @@
 					{#if imageError}
 						<p class="ort-image-error">{imageError}</p>
 					{/if}
+					{#if sceneDescription && !isGeneratingImage}
+						<details class="scene-description-details">
+							<summary>Generierte Szene</summary>
+							<p class="scene-description-text">{sceneDescription}</p>
+						</details>
+					{/if}
 				</div>
 
 				<!-- Anmerkungen rechts -->
-				<div class="anmerkungen-section" class:collapsed={!anmerkungenExpanded && generierterOrt.bilder?.length}>
+				<div class="anmerkungen-section">
 					<button class="anmerkungen-header" onclick={toggleAnmerkungen}>
 						<span class="anmerkungen-title">Anmerkungen</span>
 						<span class="anmerkungen-toggle">{anmerkungenExpanded ? '▼' : '▶'}</span>
 					</button>
-					{#if anmerkungenExpanded || !generierterOrt.bilder?.length}
+					{#if anmerkungenExpanded}
 						<textarea
 							class="anmerkungen-textarea"
 							placeholder="Beschreibe Details für die Bildgenerierung..."
 							value={generierterOrt.anmerkungen || ''}
 							oninput={updateAnmerkungen}
 						></textarea>
-						{#if hasApiKey() && generierterOrt.bilder?.length}
-							<button
-								class="btn btn-sm anmerkungen-generate-btn"
-								onclick={generateImage}
-								disabled={isGeneratingImage}
-							>
-								{isGeneratingImage ? 'Generiere...' : 'Neues Bild generieren'}
-							</button>
-						{/if}
+					{/if}
+					{#if sceneDescription}
+						<details class="gemini-szene-details">
+							<summary>Gemini Szenen-Beschreibung</summary>
+							<p class="gemini-szene-text">{sceneDescription}</p>
+						</details>
 					{/if}
 				</div>
 			</div>
@@ -545,6 +778,8 @@
 								<BekannterCard
 									{bekannter}
 									onUpdate={(updated) => aktualisiereBekannten(index, updated)}
+									ortContext={generierterOrt ? { name: generierterOrt.name, naturelleNames: generierterOrt.naturelle.map(n => n.name) } : undefined}
+									regionContext={getRegionInfoForImage()}
 								/>
 								<button
 									class="bekannte-remove-btn"
@@ -695,6 +930,15 @@
 		<a href="/jahreskreis" class="btn btn-primary mt-md">Zum Jahreskreis</a>
 	</section>
 </div>
+
+<!-- Region Editor Modal -->
+{#if showRegionEditor}
+	<RegionEditor
+		region={bearbeiteteRegion ?? undefined}
+		onSave={speichereRegion}
+		onCancel={() => { showRegionEditor = false; bearbeiteteRegion = null; }}
+	/>
+{/if}
 
 <style>
 	.intro {
@@ -1556,6 +1800,31 @@
 		margin-top: var(--space-sm);
 	}
 
+	.scene-description-details {
+		margin-top: var(--space-sm);
+		font-size: 0.85rem;
+		color: var(--color-earth);
+	}
+
+	.scene-description-details summary {
+		cursor: pointer;
+		font-weight: 500;
+		color: var(--color-earth-dark);
+	}
+
+	.scene-description-details summary:hover {
+		color: var(--color-leaf-dark);
+	}
+
+	.scene-description-text {
+		margin-top: var(--space-xs);
+		padding: var(--space-sm);
+		background: var(--color-sand-light);
+		border-radius: var(--radius-sm);
+		font-style: italic;
+		line-height: 1.5;
+	}
+
 	.haupt-tag {
 		display: inline-block;
 		background: linear-gradient(135deg, #c9a227, #9c7c38);
@@ -1677,10 +1946,32 @@
 		font-style: italic;
 	}
 
-	.anmerkungen-generate-btn {
-		display: block;
-		width: calc(100% - var(--space-md));
-		margin: 0 auto var(--space-sm);
+	.gemini-szene-details {
+		margin: var(--space-sm);
+		background: var(--color-cream);
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-earth-light);
+	}
+
+	.gemini-szene-details summary {
+		padding: var(--space-sm);
+		cursor: pointer;
+		font-size: 0.85rem;
+		color: var(--color-earth);
+		font-weight: 500;
+	}
+
+	.gemini-szene-details summary:hover {
+		color: var(--color-earth-dark);
+	}
+
+	.gemini-szene-text {
+		padding: 0 var(--space-sm) var(--space-sm);
+		margin: 0;
+		font-size: 0.85rem;
+		color: var(--color-earth-dark);
+		line-height: 1.5;
+		font-style: italic;
 	}
 
 	@media (max-width: 600px) {
@@ -1694,6 +1985,123 @@
 
 		.anmerkungen-section {
 			width: 100%;
+		}
+	}
+
+	/* Region Management Styles */
+	.regionen-section {
+		background: var(--color-parchment);
+		padding: var(--space-lg);
+		border-radius: var(--radius-lg);
+		margin-bottom: var(--space-lg);
+		border: 2px solid var(--color-earth-light);
+	}
+
+	.regionen-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: var(--space-md);
+		flex-wrap: wrap;
+		gap: var(--space-sm);
+	}
+
+	.regionen-header h3 {
+		margin: 0;
+		font-size: 1.1rem;
+		color: var(--color-bark);
+	}
+
+	.regionen-actions {
+		display: flex;
+		gap: var(--space-sm);
+	}
+
+	.regionen-liste {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-sm);
+	}
+
+	/* Aktive Region Info */
+	.aktive-region-info {
+		background: linear-gradient(135deg, rgba(107, 142, 78, 0.1) 0%, var(--color-cream) 100%);
+		padding: var(--space-md);
+		border-radius: var(--radius-md);
+		margin-bottom: var(--space-lg);
+		border: 2px solid var(--color-leaf);
+	}
+
+	.aktive-region-info h4 {
+		margin: 0 0 var(--space-sm) 0;
+		font-family: var(--font-display);
+		color: var(--color-leaf-dark);
+	}
+
+	.region-besonderheiten {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-xs);
+	}
+
+	.besonderheit-gruppe {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: var(--space-xs);
+	}
+
+	.besonderheit-label {
+		font-size: 0.85rem;
+		color: var(--color-earth);
+		font-weight: 600;
+		min-width: 100px;
+	}
+
+	.besonderheit-tag {
+		display: inline-block;
+		padding: 2px 8px;
+		border-radius: var(--radius-sm);
+		font-size: 0.85rem;
+		background: var(--color-earth-light);
+	}
+
+	.besonderheit-tag.geo {
+		background: rgba(139, 119, 101, 0.2);
+		border: 1px solid rgba(139, 119, 101, 0.4);
+	}
+
+	.besonderheit-tag.flora {
+		background: rgba(107, 142, 78, 0.2);
+		border: 1px solid rgba(107, 142, 78, 0.4);
+	}
+
+	.besonderheit-tag.arch {
+		background: rgba(156, 124, 56, 0.2);
+		border: 1px solid rgba(156, 124, 56, 0.4);
+	}
+
+	@media (max-width: 500px) {
+		.regionen-header {
+			flex-direction: column;
+			align-items: flex-start;
+		}
+
+		.regionen-actions {
+			width: 100%;
+		}
+
+		.regionen-actions button {
+			flex: 1;
+		}
+
+		.besonderheit-gruppe {
+			flex-direction: column;
+			align-items: flex-start;
+		}
+
+		.besonderheit-label {
+			min-width: auto;
 		}
 	}
 

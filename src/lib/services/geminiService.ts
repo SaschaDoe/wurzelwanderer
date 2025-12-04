@@ -1,33 +1,59 @@
 import { STORAGE_KEYS, getStoredString, setStoredString, removeStoredItem } from '$lib/utils/storage';
-import { GEMINI_API_BASE, REQUEST_TIMEOUT_MS, IMAGE_MODELS } from '$lib/constants/api';
+import { GEMINI_API_BASE, REQUEST_TIMEOUT_MS, IMAGE_MODELS, TEXT_MODEL } from '$lib/constants/api';
 
-// Get API key from environment or localStorage
-export function getApiKey(): string | null {
+// Cached API key for synchronous access
+let cachedApiKey: string | null = null;
+let apiKeyLoaded = false;
+
+// Get API key from environment or IndexedDB
+export async function getApiKey(): Promise<string | null> {
 	// First check environment variable (for dev)
 	const envKey = import.meta.env.VITE_GEMINI_API_KEY;
 	if (envKey && envKey !== 'your_api_key_here') {
 		return envKey;
 	}
 
-	// Then check localStorage
-	return getStoredString(STORAGE_KEYS.API_KEY);
+	// Return cached if already loaded
+	if (apiKeyLoaded) {
+		return cachedApiKey;
+	}
+
+	// Load from IndexedDB
+	cachedApiKey = await getStoredString(STORAGE_KEYS.API_KEY);
+	apiKeyLoaded = true;
+	return cachedApiKey;
 }
 
-export function setApiKey(key: string): void {
-	setStoredString(STORAGE_KEYS.API_KEY, key);
-}
-
-export function clearApiKey(): void {
-	removeStoredItem(STORAGE_KEYS.API_KEY);
-}
-
+// Synchronous check - uses cached value
 export function hasApiKey(): boolean {
-	return !!getApiKey();
+	// Check env first
+	const envKey = import.meta.env.VITE_GEMINI_API_KEY;
+	if (envKey && envKey !== 'your_api_key_here') {
+		return true;
+	}
+	return !!cachedApiKey;
+}
+
+// Initialize API key cache (call on app start)
+export async function initApiKey(): Promise<void> {
+	await getApiKey();
+}
+
+export async function setApiKey(key: string): Promise<void> {
+	await setStoredString(STORAGE_KEYS.API_KEY, key);
+	cachedApiKey = key;
+	apiKeyLoaded = true;
+}
+
+export async function clearApiKey(): Promise<void> {
+	await removeStoredItem(STORAGE_KEYS.API_KEY);
+	cachedApiKey = null;
+	apiKeyLoaded = true;
 }
 
 // Debug: Liste alle verfügbaren Models
 export async function listAvailableModels(): Promise<void> {
-	const apiKey = getApiKey();
+	const apiKey = await getApiKey();
 	if (!apiKey) {
 		console.error('[Gemini] Kein API Key für Model-Liste');
 		return;
@@ -65,7 +91,26 @@ export async function listAvailableModels(): Promise<void> {
 	}
 }
 
-interface BekannterInfo {
+// Region context for image generation
+export interface RegionBesonderheitInfo {
+	name: string;
+	promptText: string;
+}
+
+export interface RegionInfo {
+	name: string;
+	geographisch: RegionBesonderheitInfo[];
+	faunaFlora: RegionBesonderheitInfo[];
+	architektur?: RegionBesonderheitInfo;
+}
+
+// Ort context for Bekannter image generation
+export interface OrtContext {
+	name: string;
+	naturelleNames: string[];
+}
+
+export interface BekannterInfo {
 	name: string;
 	tier: string;
 	berufe: string[];
@@ -73,6 +118,9 @@ interface BekannterInfo {
 	merkmalBeschreibung: string;
 	kategorie: string;
 	geschlecht: string;
+	// Optional context for background
+	ortContext?: OrtContext;
+	regionContext?: RegionInfo;
 }
 
 async function tryGenerateWithModel(
@@ -169,14 +217,129 @@ async function tryGenerateWithModel(
 	}
 }
 
+/**
+ * Generate 3 diverse quotes (Zitate) for a character using the text API.
+ * Generates all quotes at once to ensure they are from different situations.
+ */
+export async function generateCharakterZitate(
+	name: string,
+	tier: string,
+	geschlecht: string,
+	berufe: string[],
+	merkmalName: string,
+	merkmalBeschreibung: string
+): Promise<{ success: boolean; zitate?: string[]; error?: string }> {
+	const apiKey = await getApiKey();
+	if (!apiKey) return { success: false, error: 'Kein API Key' };
+
+	const geschlechtText = geschlecht === 'weiblich' ? 'weibliche' : 'männlicher';
+	const berufeText = berufe.join(', ');
+
+	const prompt = `Du bist ${name}, ein ${geschlechtText} ${tier} in einem deutschen Märchen.
+Dein Beruf: ${berufeText}
+Deine Persönlichkeit: ${merkmalName} - ${merkmalBeschreibung}
+
+Erstelle genau 3 verschiedene Zitate, die dieser Charakter in unterschiedlichen Situationen sagen würde:
+1. Ein weiser oder nachdenklicher Spruch (z.B. über das Leben, die Natur, oder Freundschaft)
+2. Ein Ausruf in einer aufregenden oder gefährlichen Situation (z.B. Abenteuer, Überraschung)
+3. Ein herzlicher Satz an einen Freund oder Gefährten (z.B. Ermutigung, Trost, Begrüßung)
+
+Jedes Zitat sollte:
+- 1-2 Sätze lang sein
+- Märchenhaft und kindgerecht klingen
+- Die Persönlichkeit des Charakters widerspiegeln
+
+Antworte im Format:
+ZITAT1: [erstes Zitat]
+ZITAT2: [zweites Zitat]
+ZITAT3: [drittes Zitat]
+
+Keine Anführungszeichen, keine weiteren Erklärungen.`;
+
+	console.log(`[Gemini] Generiere 3 Zitate für ${name}...`);
+	const result = await generateTextWithModel(prompt, apiKey);
+
+	if (result.success && result.text) {
+		// Parse the 3 quotes from the response
+		const lines = result.text.trim().split('\n');
+		const zitate: string[] = [];
+
+		for (const line of lines) {
+			const match = line.match(/^ZITAT\d:\s*(.+)$/i);
+			if (match && match[1]) {
+				const zitat = match[1].trim().replace(/^["„"]|[""]$/g, '');
+				if (zitat) {
+					zitate.push(zitat);
+				}
+			}
+		}
+
+		if (zitate.length >= 3) {
+			console.log(`[Gemini] 3 Zitate generiert für ${name}`);
+			return { success: true, zitate: zitate.slice(0, 3) };
+		} else if (zitate.length > 0) {
+			console.log(`[Gemini] Nur ${zitate.length} Zitate gefunden, verwende diese`);
+			return { success: true, zitate };
+		}
+
+		// Fallback: try to split by newlines if format wasn't followed
+		const fallbackZitate = result.text
+			.split('\n')
+			.map(l => l.replace(/^\d+[\.\)]\s*/, '').replace(/^["„"]|[""]$/g, '').trim())
+			.filter(l => l.length > 10 && l.length < 200);
+
+		if (fallbackZitate.length >= 1) {
+			console.log(`[Gemini] Fallback: ${fallbackZitate.length} Zitate extrahiert`);
+			return { success: true, zitate: fallbackZitate.slice(0, 3) };
+		}
+
+		return { success: false, error: 'Zitate konnten nicht aus der Antwort extrahiert werden' };
+	}
+
+	return { success: false, error: result.error || 'Zitate konnten nicht generiert werden' };
+}
+
 export async function generateBekannterImage(bekannter: BekannterInfo): Promise<string | null> {
-	const apiKey = getApiKey();
+	const apiKey = await getApiKey();
 	if (!apiKey) {
 		throw new Error('Kein API Key vorhanden. Bitte in den Einstellungen hinterlegen.');
 	}
 
 	console.log(`[Gemini] 🎨 Starte Bildgenerierung für: ${bekannter.name} (${bekannter.tier})`);
 	console.log(`[Gemini] Verfügbare Models:`, IMAGE_MODELS);
+
+	// Build background context from region and ort
+	let backgroundContext = 'Soft, natural background with gentle colors.';
+
+	if (bekannter.regionContext || bekannter.ortContext) {
+		const contextParts: string[] = [];
+
+		// Add region features (up to 3)
+		if (bekannter.regionContext) {
+			const regionFeatures: string[] = [];
+			for (const geo of bekannter.regionContext.geographisch.slice(0, 2)) {
+				regionFeatures.push(geo.promptText);
+			}
+			for (const flora of bekannter.regionContext.faunaFlora.slice(0, 1)) {
+				regionFeatures.push(flora.promptText);
+			}
+			if (bekannter.regionContext.architektur) {
+				regionFeatures.push(bekannter.regionContext.architektur.promptText);
+			}
+			if (regionFeatures.length > 0) {
+				contextParts.push(...regionFeatures.slice(0, 3));
+			}
+		}
+
+		// Add ort naturelle (up to 2)
+		if (bekannter.ortContext && bekannter.ortContext.naturelleNames.length > 0) {
+			contextParts.push(`elements of ${bekannter.ortContext.naturelleNames.slice(0, 2).join(' and ')}`);
+		}
+
+		if (contextParts.length > 0) {
+			backgroundContext = `Background featuring: ${contextParts.slice(0, 4).join(', ')}. Fairy-tale atmosphere.`;
+		}
+	}
 
 	// Build the prompt for Fritz Baumgarten style
 	const prompt = `Create a colorful hand-drawn illustration in the style of Fritz Baumgarten (German children's book illustration, fairy-tale like, warm, detailed, watercolor-style). Do NOT include any text, labels, titles, or words in the image.
@@ -186,7 +349,7 @@ Profession: ${bekannter.berufe.join(', ')}
 Character trait: ${bekannter.merkmalName} - ${bekannter.merkmalBeschreibung}
 
 The animal creature stands upright like a human, wears appropriate clothing for their profession, and has a friendly, expressive face.
-Background: Soft, natural background with gentle colors.
+${backgroundContext}
 
 Style: Fairy-tale German children's book illustration like Fritz Baumgarten.
 Portrait orientation, vertical format, focus on the character.`;
@@ -229,10 +392,233 @@ interface OrtInfo {
 	hauptNaturell: string;
 	naturelle: NaturellInfo[];
 	anmerkungen?: string;
+	region?: RegionInfo;
+}
+
+export interface SceneGenerationResult {
+	sceneDescription: string;
+	promptForImage: string;
+}
+
+async function generateTextWithModel(
+	prompt: string,
+	apiKey: string
+): Promise<{ success: boolean; text?: string; error?: string }> {
+	const startTime = Date.now();
+	console.log(`[Gemini] 📝 Starte Textgenerierung mit Model: ${TEXT_MODEL}`);
+
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => {
+		console.warn(`[Gemini] ⚠️ Text-Timeout nach ${REQUEST_TIMEOUT_MS / 1000} Sekunden!`);
+		controller.abort();
+	}, REQUEST_TIMEOUT_MS);
+
+	try {
+		const response = await fetch(
+			`${GEMINI_API_BASE}/models/${TEXT_MODEL}:generateContent`,
+			{
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'x-goog-api-key': apiKey
+				},
+				body: JSON.stringify({
+					contents: [
+						{
+							role: 'user',
+							parts: [{ text: prompt }]
+						}
+					],
+					generationConfig: {
+						temperature: 0.9,
+						maxOutputTokens: 8192
+					}
+				}),
+				signal: controller.signal
+			}
+		);
+
+		clearTimeout(timeoutId);
+		const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+		console.log(`[Gemini] Response nach ${elapsed}s - Status: ${response.status}`);
+
+		if (!response.ok) {
+			const errorData = await response.json().catch(() => ({}));
+			const errorMessage = errorData.error?.message || response.statusText;
+			console.warn(`[Gemini] ❌ Textgenerierung fehlgeschlagen: ${errorMessage}`);
+			console.log(`[Gemini] 📋 Vollständige Error-Response:`, JSON.stringify(errorData, null, 2));
+			return { success: false, error: errorMessage };
+		}
+
+		const data = await response.json();
+		console.log(`[Gemini] 📋 Vollständige Response:`, JSON.stringify(data, null, 2));
+
+		const candidates = data.candidates || [];
+		console.log(`[Gemini] Candidates gefunden: ${candidates.length}`);
+
+		for (const candidate of candidates) {
+			console.log(`[Gemini] Candidate finishReason: ${candidate.finishReason}`);
+			const parts = candidate.content?.parts || [];
+			console.log(`[Gemini] Parts in Candidate: ${parts.length}`);
+			for (const part of parts) {
+				if (part.text) {
+					console.log(`[Gemini] ✅ Text erhalten (vollständig):`);
+					console.log(part.text);
+					return { success: true, text: part.text };
+				}
+			}
+		}
+
+		// Check for blocked content
+		if (data.promptFeedback?.blockReason) {
+			const blockReason = data.promptFeedback.blockReason;
+			console.error(`[Gemini] ⛔ Prompt wurde blockiert: ${blockReason}`);
+			return { success: false, error: `Prompt blockiert: ${blockReason}` };
+		}
+
+		console.warn(`[Gemini] ⚠️ Kein Text in der Response gefunden`);
+		return { success: false, error: 'Kein Text in der Response' };
+	} catch (error) {
+		clearTimeout(timeoutId);
+
+		if (error instanceof Error && error.name === 'AbortError') {
+			return { success: false, error: `Timeout nach ${REQUEST_TIMEOUT_MS / 1000} Sekunden` };
+		}
+
+		const errorMsg = error instanceof Error ? error.message : 'Unbekannter Fehler';
+		console.error(`[Gemini] ❌ Fehler bei Textgenerierung:`, errorMsg);
+		return { success: false, error: errorMsg };
+	}
+}
+
+export async function generateSceneDescription(ort: OrtInfo): Promise<SceneGenerationResult> {
+	const apiKey = await getApiKey();
+	if (!apiKey) {
+		throw new Error('Kein API Key vorhanden. Bitte in den Einstellungen hinterlegen.');
+	}
+
+	console.log(`[Gemini] 🎭 Generiere Szenen-Beschreibung für: ${ort.name}`);
+	console.log(`[Gemini] 📦 Ort-Daten:`, JSON.stringify(ort, null, 2));
+
+	// Build naturelle context with tags
+	const naturelleContext = ort.naturelle.map(n => {
+		const tags: string[] = [];
+		if (n.name === ort.hauptNaturell) tags.push('HAUPT');
+		if (n.metaphorisch) tags.push('METAPHORISCH');
+		const tagStr = tags.length > 0 ? ` [${tags.join(', ')}]` : '';
+		const stimmungStr = n.stimmung && n.stimmung.length > 0
+			? `\n   Atmosphäre: ${n.stimmung.slice(0, 3).join(', ')}`
+			: '';
+		return `- ${n.name}${tagStr}: ${n.beschreibung}${stimmungStr}`;
+	}).join('\n');
+
+	// Build region context
+	let regionContext = '';
+	if (ort.region) {
+		const features: string[] = [];
+		for (const geo of ort.region.geographisch) {
+			features.push(`${geo.name}: ${geo.promptText}`);
+		}
+		for (const flora of ort.region.faunaFlora) {
+			features.push(`${flora.name}: ${flora.promptText}`);
+		}
+		if (ort.region.architektur) {
+			features.push(`Architektur: ${ort.region.architektur.promptText}`);
+		}
+		if (features.length > 0) {
+			regionContext = `\n\nREGION "${ort.region.name}":\n${features.join('\n')}`;
+		}
+	}
+
+	const anmerkungenContext = ort.anmerkungen
+		? `\n\nZUSÄTZLICHE ANMERKUNGEN DES SPIELLEITERS:\n${ort.anmerkungen}`
+		: '';
+
+	const prompt = `Du bist ein kreativer Szenen-Designer für ein Märchen-Rollenspiel im Stil von Fritz Baumgarten (deutsche Kinderbuch-Illustration).
+
+AUFGABE: Beschreibe eine konkrete, bildhafte Szene für einen Ort namens "${ort.name}".
+
+NATURELLE (Orts-Aspekte):
+${naturelleContext}${regionContext}${anmerkungenContext}
+
+WICHTIGE REGELN:
+1. HAUPT-Naturell: Das ist das dominante Thema der Szene
+2. METAPHORISCH-Naturell: Zeige die ESSENZ, nicht das Wörtliche!
+   - "Feld" metaphorisch = Weite, Freiheit, Ruhe (z.B. eine Bank mit Aussicht, nicht ein Getreidefeld)
+   - "Ödland" metaphorisch = Verlassenheit, Stille (z.B. verlassene Ecken, verwelkte Pflanzen)
+   - "Wildnis" metaphorisch = ungezähmte Natur, Chaos (z.B. Efeu das alles überwuchert)
+3. ALLE Naturelle müssen sichtbar in der Szene vorkommen
+4. Integriere die Region-Features natürlich in die Szene
+5. Keine Personen oder anthropomorphe Tiere - nur Landschaft, Gebäude, kleine Tiere (Insekten, Vögel, Frösche)
+
+Beschreibe in 2-3 Sätzen auf ENGLISCH eine konkrete, visuelle Szene die alle Elemente vereint.
+Antworte NUR mit der Szenen-Beschreibung, keine Erklärungen.`;
+
+	console.log(`[Gemini] 📝 Gesendeter Prompt:`);
+	console.log(prompt);
+
+	const result = await generateTextWithModel(prompt, apiKey);
+
+	if (!result.success || !result.text) {
+		throw new Error(result.error || 'Szenen-Generierung fehlgeschlagen');
+	}
+
+	const sceneDescription = result.text.trim();
+
+	// Build the final image prompt
+	const promptForImage = `Create a colorful hand-drawn landscape illustration in the style of Fritz Baumgarten (German children's book illustration, fairy-tale like, warm, detailed, watercolor-style). Do NOT include any text, labels, titles, or words in the image. Do NOT include any humanoid characters or anthropomorphic animals - but DO include small natural creatures like butterflies, dragonflies, bees, frogs, birds, or fish if they fit the atmosphere.
+
+The scene: ${sceneDescription}
+
+This is a magical place called "${ort.name}".
+
+Style: Fairy-tale German children's book illustration like Fritz Baumgarten.
+Wide panoramic landscape orientation, horizontal format.
+Warm, inviting colors with soft lighting.`;
+
+	console.log(`[Gemini] 🎭 Szene generiert: ${sceneDescription.substring(0, 100)}...`);
+
+	return {
+		sceneDescription,
+		promptForImage
+	};
+}
+
+export async function generateImageFromPrompt(prompt: string, ortName: string): Promise<string | null> {
+	const apiKey = await getApiKey();
+	if (!apiKey) {
+		throw new Error('Kein API Key vorhanden. Bitte in den Einstellungen hinterlegen.');
+	}
+
+	console.log(`[Gemini] 🖼️ Generiere Bild für: ${ortName}`);
+	console.log(`[Gemini] Prompt: ${prompt.substring(0, 150)}...`);
+
+	let lastError = '';
+
+	for (let i = 0; i < IMAGE_MODELS.length; i++) {
+		const model = IMAGE_MODELS[i];
+		console.log(`[Gemini] 🔄 Versuch ${i + 1}/${IMAGE_MODELS.length}: ${model}`);
+
+		const result = await tryGenerateWithModel(model, prompt, apiKey);
+
+		if (result.success && result.imageData) {
+			console.log(`[Gemini] 🎉 Erfolgreich mit Model: ${model}`);
+			return result.imageData;
+		}
+
+		lastError = result.error || 'Unbekannter Fehler';
+
+		if (i < IMAGE_MODELS.length - 1) {
+			console.log(`[Gemini] ➡️ Fallback zum nächsten Model...`);
+		}
+	}
+
+	console.error(`[Gemini] 💥 Alle Models fehlgeschlagen. Letzter Fehler: ${lastError}`);
+	throw new Error(`API Error: ${lastError}`);
 }
 
 export async function generateOrtImage(ort: OrtInfo): Promise<string | null> {
-	const apiKey = getApiKey();
+	const apiKey = await getApiKey();
 	if (!apiKey) {
 		throw new Error('Kein API Key vorhanden. Bitte in den Einstellungen hinterlegen.');
 	}
@@ -275,10 +661,30 @@ export async function generateOrtImage(ort: OrtInfo): Promise<string | null> {
 		? `\n\nAtmospheric elements to include (small creatures and nature details): ${allStimmung.slice(0, 5).join(', ')}`
 		: '';
 
+	// Build region context if available
+	let regionText = '';
+	if (ort.region && (ort.region.geographisch.length > 0 || ort.region.faunaFlora.length > 0 || ort.region.architektur)) {
+		const regionFeatures: string[] = [];
+
+		for (const geo of ort.region.geographisch) {
+			regionFeatures.push(geo.promptText);
+		}
+		for (const flora of ort.region.faunaFlora) {
+			regionFeatures.push(flora.promptText);
+		}
+		if (ort.region.architektur) {
+			regionFeatures.push(ort.region.architektur.promptText);
+		}
+
+		if (regionFeatures.length > 0) {
+			regionText = `\n\nThis location is in the region of "${ort.region.name}" which features: ${regionFeatures.join('; ')}.`;
+		}
+	}
+
 	const prompt = `Create a colorful hand-drawn landscape illustration in the style of Fritz Baumgarten (German children's book illustration, fairy-tale like, warm, detailed, watercolor-style). Do NOT include any text, labels, titles, or words in the image. Do NOT include any humanoid characters or anthropomorphic animals - but DO include small natural creatures like butterflies, dragonflies, bees, frogs, birds, or fish if they fit the atmosphere.
 
 The image shows: A magical place called "${ort.name}", with a theme of: ${hauptNaturellText}.
-The location combines elements of: ${naturelleDescriptions.join(', ')}.${stimmungText}${anmerkungenText}
+The location combines elements of: ${naturelleDescriptions.join(', ')}.${regionText}${stimmungText}${anmerkungenText}
 
 This is a fairy-tale landscape with cozy details like small houses, lanterns, winding paths, bridges, and natural elements. Focus on the environment and atmosphere, not on humanoid inhabitants.
 

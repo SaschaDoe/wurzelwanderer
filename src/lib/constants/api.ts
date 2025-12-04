@@ -9,6 +9,9 @@ export const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta
 /** Request timeout in milliseconds (90 seconds) */
 export const REQUEST_TIMEOUT_MS = 90_000;
 
+/** Text generation model for scene description */
+export const TEXT_MODEL = 'gemini-2.0-flash';
+
 /**
  * Image generation models to try in order of preference.
  * Falls back to next model if the first one fails.

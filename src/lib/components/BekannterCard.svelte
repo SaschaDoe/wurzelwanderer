@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { GenerierterBekannter } from '$lib/data/merkmale';
-	import { hasApiKey } from '$lib/services/geminiService';
+	import { hasApiKey, type OrtContext, type RegionInfo } from '$lib/services/geminiService';
 	import { kategorieToClass, germanSlugify } from '$lib/utils/slugify';
 	import ImageModal from './ImageModal.svelte';
 	import CharacterAvatar from './CharacterAvatar.svelte';
@@ -13,9 +13,11 @@
 		editable?: boolean;
 		onRemove?: () => void;
 		onUpdate?: (bekannter: GenerierterBekannter) => void;
+		ortContext?: OrtContext;
+		regionContext?: RegionInfo;
 	}
 
-	let { bekannter, compact = false, editable = false, onRemove, onUpdate }: Props = $props();
+	let { bekannter, compact = false, editable = false, onRemove, onUpdate, ortContext, regionContext }: Props = $props();
 
 	let showImageModal = $state(false);
 
@@ -100,7 +102,9 @@
 			merkmalName: bekannter.merkmal.name,
 			merkmalBeschreibung: bekannter.merkmal.beschreibung,
 			kategorie: bekannter.kategorie,
-			geschlecht: bekannter.geschlecht
+			geschlecht: bekannter.geschlecht,
+			ortContext,
+			regionContext
 		};
 	}
 </script>

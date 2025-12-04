@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { browser } from '$app/environment';
+	import { onMount } from 'svelte';
 	import { getApiKey, setApiKey, clearApiKey, hasApiKey, listAvailableModels } from '$lib/services/geminiService';
 
 	let apiKeyInput = $state('');
@@ -9,28 +9,26 @@
 	let modelsLaden = $state(false);
 
 	// Load on mount
-	$effect(() => {
-		if (browser) {
-			const envKey = import.meta.env.VITE_GEMINI_API_KEY;
-			envKeyVorhanden = !!(envKey && envKey !== 'your_api_key_here');
+	onMount(async () => {
+		const envKey = import.meta.env.VITE_GEMINI_API_KEY;
+		envKeyVorhanden = !!(envKey && envKey !== 'your_api_key_here');
 
-			const savedKey = getApiKey();
-			if (savedKey) {
-				apiKeyInput = savedKey;
-				apiKeyGespeichert = true;
-			}
+		const savedKey = await getApiKey();
+		if (savedKey) {
+			apiKeyInput = savedKey;
+			apiKeyGespeichert = true;
 		}
 	});
 
-	function speichereKey() {
+	async function speichereKey() {
 		if (apiKeyInput.trim()) {
-			setApiKey(apiKeyInput.trim());
+			await setApiKey(apiKeyInput.trim());
 			apiKeyGespeichert = true;
 		}
 	}
 
-	function loescheKey() {
-		clearApiKey();
+	async function loescheKey() {
+		await clearApiKey();
 		apiKeyInput = '';
 		apiKeyGespeichert = false;
 	}
