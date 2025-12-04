@@ -1,7 +1,10 @@
 <script lang="ts">
 	import type { GenerierterBekannter } from '$lib/data/merkmale';
-	import { generateBekannterImage, hasApiKey } from '$lib/services/geminiService';
+	import { hasApiKey } from '$lib/services/geminiService';
 	import { kategorieToClass, germanSlugify } from '$lib/utils/slugify';
+	import ImageModal from './ImageModal.svelte';
+	import CharacterAvatar from './CharacterAvatar.svelte';
+	import CharacterImageArea from './CharacterImageArea.svelte';
 
 	interface Props {
 		bekannter: GenerierterBekannter;
@@ -13,8 +16,6 @@
 
 	let { bekannter, compact = false, editable = false, onRemove, onUpdate }: Props = $props();
 
-	let isGeneratingImage = $state(false);
-	let imageError = $state<string | null>(null);
 	let showImageModal = $state(false);
 
 	function getTierBezeichnung(tier: string, geschlecht: string): string {
@@ -73,58 +74,46 @@
 		}
 	}
 
-	async function generateImage() {
-		if (isGeneratingImage || !onUpdate) return;
-
-		isGeneratingImage = true;
-		imageError = null;
-
-		try {
-			const imageData = await generateBekannterImage({
-				name: bekannter.name,
-				tier: bekannter.tier,
-				berufe: bekannter.berufe,
-				merkmalName: bekannter.merkmal.name,
-				merkmalBeschreibung: bekannter.merkmal.beschreibung,
-				kategorie: bekannter.kategorie,
-				geschlecht: bekannter.geschlecht
-			});
-
-			if (imageData) {
-				const updated = { ...bekannter, bild: imageData };
-				onUpdate(updated);
-			} else {
-				imageError = 'Kein Bild erhalten';
-			}
-		} catch (error) {
-			imageError = error instanceof Error ? error.message : 'Unbekannter Fehler';
-		} finally {
-			isGeneratingImage = false;
-		}
+	function handleImageGenerated(imageData: string) {
+		if (!onUpdate) return;
+		onUpdate({ ...bekannter, bild: imageData });
 	}
 
-	function removeImage() {
+	function handleImageRemoved() {
 		if (!onUpdate) return;
 		const updated = { ...bekannter };
 		delete updated.bild;
 		onUpdate(updated);
+	}
+
+	// Build character info for image generation
+	$effect(() => {
+		// This is reactive to bekannter changes
+	});
+
+	function getCharacterInfo() {
+		return {
+			name: bekannter.name,
+			tier: bekannter.tier,
+			berufe: bekannter.berufe,
+			merkmalName: bekannter.merkmal.name,
+			merkmalBeschreibung: bekannter.merkmal.beschreibung,
+			kategorie: bekannter.kategorie,
+			geschlecht: bekannter.geschlecht
+		};
 	}
 </script>
 
 {#if compact}
 	<!-- Compact card for lists -->
 	<div class="bekannte-card-compact" data-kategorie={kategorieToClass(bekannter.kategorie)}>
-		{#if bekannter.bild}
-			<img src={bekannter.bild} alt={bekannter.name} class="avatar-image" />
-		{:else}
-			<div class="avatar" class:chimaere={bekannter.chimaere}>
-				{#if bekannter.chimaere}
-					<span class="chimaere-letters">{bekannter.chimaere.oben.charAt(0)} {bekannter.chimaere.unten.charAt(0)}</span>
-				{:else}
-					{bekannter.tier.charAt(0)}
-				{/if}
-			</div>
-		{/if}
+		<CharacterAvatar
+			src={bekannter.bild}
+			name={bekannter.name}
+			tier={bekannter.tier}
+			chimaere={bekannter.chimaere}
+			size="small"
+		/>
 		<div class="identity">
 			<span class="name">{bekannter.name}</span>
 			<span class="tier">
@@ -152,44 +141,17 @@
 	<!-- Full card with details -->
 	<div class="bekannte-card-full card" data-kategorie={kategorieToClass(bekannter.kategorie)}>
 		<header class="card-header">
-			<div class="image-area">
-				{#if bekannter.bild}
-					<button class="image-button" onclick={() => showImageModal = true} title="Bild vergrößern">
-						<img src={bekannter.bild} alt={bekannter.name} class="generated-image" />
-					</button>
-					{#if onUpdate}
-						<button class="remove-image-btn" onclick={removeImage} title="Bild entfernen">×</button>
-					{/if}
-				{:else if onUpdate && hasApiKey()}
-					<button
-						class="image-placeholder"
-						onclick={generateImage}
-						disabled={isGeneratingImage}
-						title="Klicken um Bild zu generieren"
-					>
-						{#if isGeneratingImage}
-							<span class="placeholder-spinner"></span>
-							<span class="placeholder-text">Generiere...</span>
-						{:else}
-							<span class="placeholder-icon">🎨</span>
-							<span class="placeholder-text">Bild generieren</span>
-						{/if}
-					</button>
-				{:else}
-					<div class="image-placeholder-static">
-						<span class="placeholder-letter" class:chimaere={bekannter.chimaere}>
-							{#if bekannter.chimaere}
-								{bekannter.chimaere.oben.charAt(0)}{bekannter.chimaere.unten.charAt(0)}
-							{:else}
-								{bekannter.tier.charAt(0)}
-							{/if}
-						</span>
-					</div>
-				{/if}
-				{#if imageError}
-					<p class="image-error">{imageError}</p>
-				{/if}
-			</div>
+			<CharacterImageArea
+				src={bekannter.bild}
+				name={bekannter.name}
+				tier={bekannter.tier}
+				chimaere={bekannter.chimaere}
+				characterInfo={getCharacterInfo()}
+				editable={!!onUpdate}
+				onImageClick={() => showImageModal = true}
+				onImageGenerated={handleImageGenerated}
+				onImageRemoved={handleImageRemoved}
+			/>
 			<div class="header-info">
 				<h2
 					contenteditable={editable}
@@ -249,6 +211,7 @@
 							onblur={(e) => handleEdit('beruf', e)}
 							onkeydown={handleKeyDown}
 							class:editable-field={editable}
+							role={editable ? 'textbox' : undefined}
 							title={editable ? 'Doppelklick zum Bearbeiten' : ''}
 						>{beruf}</span>
 					{/each}
@@ -287,6 +250,7 @@
 							onblur={(e) => handleEdit('frage', e)}
 							onkeydown={handleKeyDown}
 							class:editable-field={editable}
+							role={editable ? 'textbox' : undefined}
 							title={editable ? 'Doppelklick zum Bearbeiten' : ''}
 						><em>{bekannter.charakterKlasse.frage}</em></p>
 					</div>
@@ -307,6 +271,7 @@
 							onblur={(e) => handleEdit('besonders', e)}
 							onkeydown={handleKeyDown}
 							class:editable-field={editable}
+							role={editable ? 'textbox' : undefined}
 							title={editable ? 'Doppelklick zum Bearbeiten' : ''}
 						>{bekannter.charakterKlasse.besonders}</span>
 					</div>
@@ -322,13 +287,12 @@
 
 <!-- Image Modal -->
 {#if showImageModal && bekannter.bild}
-	<div class="image-modal-overlay" onclick={() => showImageModal = false}>
-		<div class="image-modal-content" onclick={(e) => e.stopPropagation()}>
-			<img src={bekannter.bild} alt={bekannter.name} class="modal-image" />
-			<button class="modal-close-btn" onclick={() => showImageModal = false}>×</button>
-			<p class="modal-caption">{bekannter.name}</p>
-		</div>
-	</div>
+	<ImageModal
+		src={bekannter.bild}
+		alt={bekannter.name}
+		caption={bekannter.name}
+		onClose={() => showImageModal = false}
+	/>
 {/if}
 
 <style>
@@ -351,171 +315,6 @@
 	.bekannte-card-compact[data-kategorie="sozial"] { border-left-color: #ff9800; }
 	.bekannte-card-compact[data-kategorie="trauma"] { border-left-color: #8e7cc3; }
 
-	.avatar-image {
-		width: 40px;
-		height: 40px;
-		border-radius: 50%;
-		object-fit: cover;
-		flex-shrink: 0;
-		border: 2px solid var(--color-earth-light);
-	}
-
-	.avatar {
-		width: 40px;
-		height: 40px;
-		border-radius: 50%;
-		background: var(--color-earth);
-		color: var(--color-cream);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		font-weight: bold;
-		text-transform: uppercase;
-		flex-shrink: 0;
-	}
-
-	.avatar.large {
-		width: 60px;
-		height: 60px;
-		font-size: 1.5rem;
-	}
-
-	/* Image area styles */
-	.image-area {
-		position: relative;
-		width: 140px;
-		height: 190px;
-		flex-shrink: 0;
-	}
-
-	.image-button {
-		width: 100%;
-		height: 100%;
-		padding: 0;
-		border: none;
-		background: none;
-		cursor: zoom-in;
-		border-radius: var(--radius-lg);
-		overflow: hidden;
-		transition: transform 0.2s ease, box-shadow 0.2s ease;
-	}
-
-	.image-button:hover {
-		transform: scale(1.02);
-		box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
-	}
-
-	.generated-image {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		border-radius: var(--radius-lg);
-		border: 3px solid var(--color-earth-light);
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-	}
-
-	.image-placeholder,
-	.image-placeholder-static {
-		width: 100%;
-		height: 100%;
-		border-radius: var(--radius-lg);
-		border: 3px dashed var(--color-earth-light);
-		background: var(--color-cream);
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: var(--space-sm);
-	}
-
-	.image-placeholder {
-		cursor: pointer;
-		transition: all 0.2s ease;
-	}
-
-	.image-placeholder:hover:not(:disabled) {
-		border-color: var(--color-leaf);
-		background: rgba(107, 142, 78, 0.1);
-	}
-
-	.image-placeholder:disabled {
-		cursor: wait;
-	}
-
-	.placeholder-icon {
-		font-size: 2rem;
-	}
-
-	.placeholder-text {
-		font-size: 0.8rem;
-		color: var(--color-earth);
-		font-weight: 500;
-		text-align: center;
-	}
-
-	.placeholder-letter {
-		font-size: 3rem;
-		font-weight: bold;
-		color: var(--color-earth);
-		text-transform: uppercase;
-		opacity: 0.5;
-	}
-
-	.placeholder-letter.chimaere {
-		font-size: 2rem;
-		background: linear-gradient(135deg, #9c7c38 50%, #c9a227 50%);
-		-webkit-background-clip: text;
-		-webkit-text-fill-color: transparent;
-		background-clip: text;
-	}
-
-	.placeholder-spinner {
-		width: 24px;
-		height: 24px;
-		border: 3px solid var(--color-earth-light);
-		border-top-color: var(--color-leaf);
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
-	}
-
-	.image-error {
-		position: absolute;
-		bottom: -24px;
-		left: 0;
-		right: 0;
-		font-size: 0.75rem;
-		color: #dc3545;
-		text-align: center;
-		margin: 0;
-	}
-
-	.remove-image-btn {
-		position: absolute;
-		top: -8px;
-		right: -8px;
-		width: 24px;
-		height: 24px;
-		border: none;
-		border-radius: 50%;
-		background: #dc3545;
-		color: white;
-		font-size: 1.2rem;
-		cursor: pointer;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		opacity: 0;
-		transition: opacity 0.2s ease;
-	}
-
-	.image-area:hover .remove-image-btn {
-		opacity: 1;
-	}
-
-	.remove-image-btn:hover {
-		background: #c82333;
-	}
-
 	.identity {
 		flex: 1;
 		min-width: 0;
@@ -536,20 +335,6 @@
 		color: var(--color-earth);
 		font-style: italic;
 		margin: 0;
-	}
-
-	.avatar.chimaere {
-		background: linear-gradient(135deg, #9c7c38 50%, #c9a227 50%);
-	}
-
-	.chimaere-letters {
-		font-size: 0.75rem;
-		letter-spacing: 1px;
-	}
-
-	.avatar.large .chimaere-letters {
-		font-size: 1rem;
-		letter-spacing: 2px;
 	}
 
 	.merkmal-badge {
@@ -747,10 +532,6 @@
 		line-height: 1.5;
 	}
 
-	@keyframes spin {
-		to { transform: rotate(360deg); }
-	}
-
 	.api-key-hint {
 		font-size: 0.9rem;
 		color: var(--color-earth);
@@ -891,68 +672,5 @@
 			justify-content: center;
 			margin-top: var(--space-xs);
 		}
-
-		.image-area {
-			width: 120px;
-			height: 160px;
-		}
-	}
-
-	/* Image Modal Styles */
-	.image-modal-overlay {
-		position: fixed;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		background: rgba(0, 0, 0, 0.9);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-		padding: var(--space-lg);
-		cursor: zoom-out;
-	}
-
-	.image-modal-content {
-		position: relative;
-		max-width: 90vw;
-		max-height: 90vh;
-		cursor: default;
-	}
-
-	.modal-image {
-		max-width: 100%;
-		max-height: 85vh;
-		border-radius: var(--radius-lg);
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-	}
-
-	.modal-close-btn {
-		position: absolute;
-		top: -40px;
-		right: 0;
-		width: 36px;
-		height: 36px;
-		border: none;
-		border-radius: 50%;
-		background: rgba(255, 255, 255, 0.2);
-		color: white;
-		font-size: 1.5rem;
-		cursor: pointer;
-		transition: background 0.2s ease;
-	}
-
-	.modal-close-btn:hover {
-		background: rgba(255, 255, 255, 0.3);
-	}
-
-	.modal-caption {
-		text-align: center;
-		color: white;
-		font-family: var(--font-display);
-		font-size: 1.2rem;
-		margin-top: var(--space-md);
-		opacity: 0.9;
 	}
 </style>
