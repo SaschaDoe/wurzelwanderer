@@ -1,6 +1,8 @@
 <script lang="ts">
-	import type { GenerierterBekannter } from '$lib/data/merkmale';
-	import { hasApiKey, type OrtContext, type RegionInfo } from '$lib/services/geminiService';
+	import type { GenerierterBekannter, VerbundenerBekannter, Muendel, Hummel } from '$lib/data/merkmale';
+	import { generiereHummel, generiereMuendel } from '$lib/data/merkmale';
+	import { charaktere, type VerbundeneBekannteConfig } from '$lib/data/charaktere';
+	import { hasApiKey, generateHummelImage, type OrtContext, type RegionInfo } from '$lib/services/geminiService';
 	import { kategorieToClass, germanSlugify } from '$lib/utils/slugify';
 	import ImageModal from './ImageModal.svelte';
 	import CharacterAvatar from './CharacterAvatar.svelte';
@@ -20,6 +22,121 @@
 	let { bekannter, compact = false, editable = false, onRemove, onUpdate, ortContext, regionContext }: Props = $props();
 
 	let showImageModal = $state(false);
+
+	// Get verbundene Bekannte config if this character has a charakterKlasse
+	let verbundeneConfig = $derived.by(() => {
+		if (!bekannter.charakterKlasse) return undefined;
+		const charKlasse = charaktere.find(c => c.name === bekannter.charakterKlasse?.name);
+		return charKlasse?.verbundeneBekannte;
+	});
+
+	// Helper to check if we can add more verbundene
+	function kannHinzufuegen(): boolean {
+		const config = verbundeneConfig;
+		if (!config) return false;
+		if (config.maxAnzahl === undefined) return true;
+		const aktuelleAnzahl = bekannter.verbundeneBekannte?.length || 0;
+		return aktuelleAnzahl < config.maxAnzahl;
+	}
+
+	// Add a new verbundener Bekannter
+	function addVerbundener() {
+		if (!onUpdate) return;
+		const config = verbundeneConfig;
+		if (!config) return;
+
+		let neuer: VerbundenerBekannter;
+		if (config.typ === 'hummel') {
+			neuer = generiereHummel();
+		} else if (config.typ === 'muendel') {
+			neuer = generiereMuendel();
+		} else {
+			return;
+		}
+
+		const updated = {
+			...bekannter,
+			verbundeneBekannte: [...(bekannter.verbundeneBekannte || []), neuer]
+		};
+		onUpdate(updated);
+	}
+
+	// Remove a verbundener Bekannter by id
+	function removeVerbundener(id: string) {
+		if (!onUpdate) return;
+		const updated = {
+			...bekannter,
+			verbundeneBekannte: bekannter.verbundeneBekannte?.filter(v => v.id !== id) || []
+		};
+		onUpdate(updated);
+	}
+
+	// Type guards
+	function isHummel(v: VerbundenerBekannter): v is Hummel {
+		return v.typ === 'hummel';
+	}
+
+	function isMuendel(v: VerbundenerBekannter): v is Muendel {
+		return v.typ === 'muendel';
+	}
+
+	// State for hummel image generation
+	let generatingHummelId = $state<string | null>(null);
+	let hummelImageError = $state<string | null>(null);
+
+	// Update a verbundener Bekannter
+	function updateVerbundener(id: string, updates: Partial<Hummel> | Partial<Muendel>) {
+		if (!onUpdate || !bekannter.verbundeneBekannte) return;
+
+		const updatedVerbundene = bekannter.verbundeneBekannte.map(v => {
+			if (v.id === id) {
+				return { ...v, ...updates };
+			}
+			return v;
+		});
+
+		onUpdate({
+			...bekannter,
+			verbundeneBekannte: updatedVerbundene
+		});
+	}
+
+	// Handle editable field blur for Hummel
+	function handleHummelEdit(hummelId: string, field: 'name' | 'aussehen' | 'persoenlichkeit', event: Event) {
+		if (!editable) return;
+		const target = event.target as HTMLElement;
+		const newValue = target.innerText.trim();
+		updateVerbundener(hummelId, { [field]: newValue });
+	}
+
+	// Generate image for a Hummel
+	async function generateHummelBild(hummel: Hummel) {
+		if (!onUpdate || generatingHummelId) return;
+
+		generatingHummelId = hummel.id;
+		hummelImageError = null;
+
+		try {
+			const imageData = await generateHummelImage({
+				name: hummel.name,
+				aussehen: hummel.aussehen,
+				persoenlichkeit: hummel.persoenlichkeit
+			});
+
+			if (imageData) {
+				updateVerbundener(hummel.id, { bild: imageData });
+			}
+		} catch (error) {
+			hummelImageError = error instanceof Error ? error.message : 'Fehler bei der Bildgenerierung';
+		} finally {
+			generatingHummelId = null;
+		}
+	}
+
+	// Remove hummel image
+	function removeHummelBild(hummelId: string) {
+		updateVerbundener(hummelId, { bild: undefined });
+	}
 
 	function getTierBezeichnung(tier: string, geschlecht: string): string {
 		if (geschlecht === 'weiblich') {
@@ -275,6 +392,139 @@
 
 					{#if bekannter.charakterKlasse.warnung}
 						<div class="warnung">⚠️ {bekannter.charakterKlasse.warnung}</div>
+					{/if}
+				</div>
+			{/if}
+
+			<!-- Verbundene Bekannte Section -->
+			{#if verbundeneConfig}
+				<div class="verbundene-section">
+					<div class="verbundene-header">
+						<h4>{verbundeneConfig.labelPlural || 'Verbundene'}</h4>
+						{#if editable && kannHinzufuegen()}
+							<button class="btn-add-verbundener" onclick={addVerbundener}>
+								+ {verbundeneConfig.buttonText || 'Hinzufügen'}
+							</button>
+						{/if}
+					</div>
+
+					{#if bekannter.verbundeneBekannte && bekannter.verbundeneBekannte.length > 0}
+						<div class="verbundene-liste">
+							{#each bekannter.verbundeneBekannte as verbundener}
+								<div class="verbundener-card" data-typ={verbundener.typ}>
+									{#if isHummel(verbundener)}
+										<!-- Hummel Anzeige -->
+										<div class="hummel-card">
+											<!-- Hummel Bild-Bereich -->
+											<div class="hummel-image-area">
+												{#if verbundener.bild}
+													<div class="hummel-image-container">
+														<img src={verbundener.bild} alt={verbundener.name} class="hummel-image" />
+														{#if editable}
+															<button
+																class="hummel-regenerate-btn"
+																onclick={() => generateHummelBild(verbundener)}
+																disabled={generatingHummelId === verbundener.id}
+																title="Neues Bild generieren"
+															>🔄</button>
+														{/if}
+													</div>
+												{:else if hasApiKey() && editable}
+													<button
+														class="hummel-image-placeholder"
+														onclick={() => generateHummelBild(verbundener)}
+														disabled={generatingHummelId === verbundener.id}
+														title="Klicken um Bild zu generieren"
+													>
+														{#if generatingHummelId === verbundener.id}
+															<span class="hummel-spinner"></span>
+														{:else}
+															<span class="hummel-placeholder-icon">🐝</span>
+															<span class="hummel-placeholder-text">Bild</span>
+														{/if}
+													</button>
+												{:else}
+													<div class="hummel-icon">🐝</div>
+												{/if}
+											</div>
+											<div class="hummel-info">
+												<strong
+													class="hummel-name"
+													contenteditable={editable}
+													onblur={(e) => handleHummelEdit(verbundener.id, 'name', e)}
+													onkeydown={handleKeyDown}
+													class:editable-field={editable}
+												>{verbundener.name}</strong>
+												<p
+													class="hummel-aussehen"
+													contenteditable={editable}
+													onblur={(e) => handleHummelEdit(verbundener.id, 'aussehen', e)}
+													onkeydown={handleKeyDown}
+													class:editable-field={editable}
+												>{verbundener.aussehen}</p>
+												<p
+													class="hummel-persoenlichkeit"
+													contenteditable={editable}
+													onblur={(e) => handleHummelEdit(verbundener.id, 'persoenlichkeit', e)}
+													onkeydown={handleKeyDown}
+													class:editable-field={editable}
+												><em>{verbundener.persoenlichkeit}</em></p>
+											</div>
+											{#if editable}
+												<button
+													class="btn-remove-verbundener"
+													onclick={() => removeVerbundener(verbundener.id)}
+													title="Entfernen"
+												>×</button>
+											{/if}
+										</div>
+										{#if hummelImageError && generatingHummelId === null}
+											<p class="hummel-error">{hummelImageError}</p>
+										{/if}
+									{:else if isMuendel(verbundener)}
+										<!-- Mündel Anzeige -->
+										<div class="muendel-card">
+											<div class="muendel-avatar">
+												{#if verbundener.bild}
+													<img src={verbundener.bild} alt={verbundener.name} />
+												{:else}
+													<span class="muendel-placeholder">👶</span>
+												{/if}
+											</div>
+											<div class="muendel-info">
+												<strong class="muendel-name">{verbundener.name}</strong>
+												<p class="muendel-tier">{verbundener.beschreibung}</p>
+												<div class="muendel-merkmal">
+													<MerkmalBadge
+														name={verbundener.merkmal.name}
+														magisch={verbundener.merkmal.magisch}
+														trauma={verbundener.merkmal.trauma}
+													/>
+												</div>
+												<p class="muendel-beruf">{verbundener.berufe[0]}</p>
+											</div>
+											{#if editable}
+												<button
+													class="btn-remove-verbundener"
+													onclick={() => removeVerbundener(verbundener.id)}
+													title="Entfernen"
+												>×</button>
+											{/if}
+										</div>
+									{/if}
+								</div>
+							{/each}
+						</div>
+					{:else}
+						<p class="keine-verbundene">
+							{#if verbundeneConfig.typ === 'hummel'}
+								Noch keine Hummeln im Schwarm.
+							{:else if verbundeneConfig.typ === 'muendel'}
+								Noch kein Mündel vorhanden.
+							{:else}
+								Keine verbundenen Bekannten.
+							{/if}
+						</p>
 					{/if}
 				</div>
 			{/if}
@@ -630,5 +880,301 @@
 			flex-wrap: wrap;
 		}
 
+	}
+
+	/* Verbundene Bekannte Section */
+	.verbundene-section {
+		margin-top: var(--space-lg);
+		padding-top: var(--space-lg);
+		border-top: 2px solid var(--color-earth-light);
+	}
+
+	.verbundene-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: var(--space-md);
+	}
+
+	.verbundene-header h4 {
+		margin: 0;
+		font-family: var(--font-display);
+		color: var(--color-leaf-dark);
+	}
+
+	.btn-add-verbundener {
+		padding: var(--space-xs) var(--space-sm);
+		background: var(--color-leaf);
+		color: white;
+		border: none;
+		border-radius: var(--radius-md);
+		cursor: pointer;
+		font-size: 0.85rem;
+		font-weight: 600;
+		transition: all 0.2s ease;
+	}
+
+	.btn-add-verbundener:hover {
+		background: var(--color-leaf-dark);
+		transform: translateY(-1px);
+	}
+
+	.verbundene-liste {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-sm);
+	}
+
+	.verbundener-card {
+		position: relative;
+	}
+
+	/* Hummel Card Styles */
+	.hummel-card {
+		display: flex;
+		gap: var(--space-md);
+		padding: var(--space-md);
+		background: linear-gradient(135deg, rgba(255, 193, 7, 0.1), rgba(255, 152, 0, 0.1));
+		border: 2px solid rgba(255, 193, 7, 0.3);
+		border-radius: var(--radius-md);
+		align-items: flex-start;
+	}
+
+	.hummel-image-area {
+		flex-shrink: 0;
+	}
+
+	.hummel-image-container {
+		position: relative;
+		width: 80px;
+		height: 80px;
+	}
+
+	.hummel-image {
+		width: 80px;
+		height: 80px;
+		border-radius: var(--radius-md);
+		object-fit: cover;
+		border: 2px solid rgba(255, 193, 7, 0.5);
+	}
+
+	.hummel-regenerate-btn {
+		position: absolute;
+		bottom: -4px;
+		right: -4px;
+		width: 24px;
+		height: 24px;
+		border: none;
+		border-radius: 50%;
+		background: var(--color-leaf);
+		color: white;
+		font-size: 0.75rem;
+		cursor: pointer;
+		opacity: 0.8;
+		transition: all 0.2s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.hummel-regenerate-btn:hover:not(:disabled) {
+		opacity: 1;
+		transform: scale(1.1);
+	}
+
+	.hummel-regenerate-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.hummel-image-placeholder {
+		width: 80px;
+		height: 80px;
+		border-radius: var(--radius-md);
+		background: linear-gradient(135deg, rgba(255, 193, 7, 0.2), rgba(255, 152, 0, 0.2));
+		border: 2px dashed rgba(255, 193, 7, 0.5);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+
+	.hummel-image-placeholder:hover:not(:disabled) {
+		background: linear-gradient(135deg, rgba(255, 193, 7, 0.3), rgba(255, 152, 0, 0.3));
+		border-color: rgba(255, 193, 7, 0.8);
+	}
+
+	.hummel-image-placeholder:disabled {
+		cursor: wait;
+	}
+
+	.hummel-placeholder-icon {
+		font-size: 1.5rem;
+	}
+
+	.hummel-placeholder-text {
+		font-size: 0.7rem;
+		color: var(--color-earth);
+		margin-top: 2px;
+	}
+
+	.hummel-spinner {
+		width: 24px;
+		height: 24px;
+		border: 3px solid rgba(255, 193, 7, 0.3);
+		border-top-color: #ffc107;
+		border-radius: 50%;
+		animation: spin 1s linear infinite;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	.hummel-icon {
+		font-size: 2rem;
+		flex-shrink: 0;
+		width: 80px;
+		height: 80px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: rgba(255, 193, 7, 0.1);
+		border-radius: var(--radius-md);
+	}
+
+	.hummel-info {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.hummel-name {
+		font-family: var(--font-display);
+		font-size: 1.1rem;
+		color: var(--color-bark);
+		display: block;
+	}
+
+	.hummel-aussehen {
+		font-size: 0.9rem;
+		color: var(--color-earth-dark);
+		margin: var(--space-xs) 0;
+	}
+
+	.hummel-persoenlichkeit {
+		font-size: 0.85rem;
+		color: var(--color-earth);
+		margin: 0;
+	}
+
+	.hummel-error {
+		color: #c0392b;
+		font-size: 0.8rem;
+		margin-top: var(--space-xs);
+		padding: var(--space-xs);
+		background: rgba(192, 57, 43, 0.1);
+		border-radius: var(--radius-sm);
+	}
+
+	/* Mündel Card Styles */
+	.muendel-card {
+		display: flex;
+		gap: var(--space-md);
+		padding: var(--space-md);
+		background: linear-gradient(135deg, rgba(139, 119, 101, 0.1), rgba(107, 142, 78, 0.1));
+		border: 2px solid rgba(139, 119, 101, 0.3);
+		border-radius: var(--radius-md);
+		align-items: flex-start;
+	}
+
+	.muendel-avatar {
+		width: 60px;
+		height: 60px;
+		border-radius: 50%;
+		overflow: hidden;
+		flex-shrink: 0;
+		background: var(--color-cream);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border: 2px solid var(--color-earth-light);
+	}
+
+	.muendel-avatar img {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+
+	.muendel-placeholder {
+		font-size: 1.5rem;
+	}
+
+	.muendel-info {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.muendel-name {
+		font-family: var(--font-display);
+		font-size: 1.1rem;
+		color: var(--color-bark);
+	}
+
+	.muendel-tier {
+		font-size: 0.9rem;
+		color: var(--color-earth-dark);
+		margin: var(--space-xs) 0;
+		font-style: italic;
+	}
+
+	.muendel-merkmal {
+		margin: var(--space-xs) 0;
+	}
+
+	.muendel-beruf {
+		font-size: 0.85rem;
+		color: var(--color-earth);
+		margin: 0;
+		padding: var(--space-xs) var(--space-sm);
+		background: var(--color-earth-light);
+		border-radius: var(--radius-sm);
+		display: inline-block;
+	}
+
+	.btn-remove-verbundener {
+		position: absolute;
+		top: var(--space-sm);
+		right: var(--space-sm);
+		width: 24px;
+		height: 24px;
+		border: none;
+		border-radius: 50%;
+		background: rgba(0, 0, 0, 0.1);
+		color: var(--color-earth-dark);
+		font-size: 1.1rem;
+		cursor: pointer;
+		opacity: 0.6;
+		transition: all 0.2s ease;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.btn-remove-verbundener:hover {
+		opacity: 1;
+		background: #c0392b;
+		color: white;
+	}
+
+	.keine-verbundene {
+		text-align: center;
+		color: var(--color-earth);
+		font-style: italic;
+		padding: var(--space-md);
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
 	}
 </style>

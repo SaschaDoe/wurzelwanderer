@@ -380,6 +380,60 @@ Portrait orientation, vertical format, focus on the character.`;
 	throw new Error(`API Error: ${lastError}`);
 }
 
+export interface HummelInfo {
+	name: string;
+	aussehen: string;
+	persoenlichkeit: string;
+}
+
+export async function generateHummelImage(hummel: HummelInfo): Promise<string | null> {
+	const apiKey = await getApiKey();
+	if (!apiKey) {
+		throw new Error('Kein API Key vorhanden. Bitte in den Einstellungen hinterlegen.');
+	}
+
+	console.log(`[Gemini] 🐝 Starte Bildgenerierung für Hummel: ${hummel.name}`);
+
+	// Build the prompt for Fritz Baumgarten style bumblebee
+	const prompt = `Create a colorful hand-drawn illustration in the style of Fritz Baumgarten (German children's book illustration, fairy-tale like, warm, detailed, watercolor-style). Do NOT include any text, labels, titles, or words in the image.
+
+The image shows: A magical fairy-tale bumblebee named "${hummel.name}".
+Appearance: ${hummel.aussehen}
+Personality: ${hummel.persoenlichkeit}
+
+The bumblebee is adorable and round with fuzzy fur, tiny translucent wings, and an expressive, friendly face with big eyes. It's a cute, anthropomorphic bumblebee character suitable for a children's book.
+
+Background: Soft floral environment with flowers, petals, or honeycomb elements.
+
+Style: Fairy-tale German children's book illustration like Fritz Baumgarten. Warm, cozy, whimsical.
+Square format, focus on the bumblebee character.`;
+
+	let lastError = '';
+
+	// Try each model in order
+	for (let i = 0; i < IMAGE_MODELS.length; i++) {
+		const model = IMAGE_MODELS[i];
+		console.log(`[Gemini] 🔄 Versuch ${i + 1}/${IMAGE_MODELS.length}: ${model}`);
+
+		const result = await tryGenerateWithModel(model, prompt, apiKey);
+
+		if (result.success && result.imageData) {
+			console.log(`[Gemini] 🎉 Erfolgreich mit Model: ${model}`);
+			return result.imageData;
+		}
+
+		lastError = result.error || 'Unbekannter Fehler';
+
+		if (i < IMAGE_MODELS.length - 1) {
+			console.log(`[Gemini] ➡️ Fallback zum nächsten Model...`);
+		}
+	}
+
+	// All models failed
+	console.error(`[Gemini] 💥 Alle Models fehlgeschlagen. Letzter Fehler: ${lastError}`);
+	throw new Error(`API Error: ${lastError}`);
+}
+
 interface NaturellInfo {
 	name: string;
 	beschreibung: string;
@@ -398,6 +452,7 @@ interface OrtInfo {
 export interface SceneGenerationResult {
 	sceneDescription: string;
 	promptForImage: string;
+	suggestedName: string; // Neuer, passender Ort-Name basierend auf der Szene
 }
 
 async function generateTextWithModel(
@@ -534,7 +589,48 @@ export async function generateSceneDescription(ort: OrtInfo): Promise<SceneGener
 		? `\n\nZUSÄTZLICHE ANMERKUNGEN DES SPIELLEITERS:\n${ort.anmerkungen}`
 		: '';
 
-	const prompt = `Du bist ein kreativer Szenen-Designer für ein Märchen-Rollenspiel im Stil von Fritz Baumgarten (deutsche Kinderbuch-Illustration).
+	// Check if there are metaphorical naturelle and build specific guidance
+	const metaphorischeNaturelle = ort.naturelle.filter(n => n.metaphorisch);
+	let metaphorischHinweis = '';
+
+	if (metaphorischeNaturelle.length > 0) {
+		const metaphorischBeispiele: Record<string, string> = {
+			'Gasthaus': 'Gemütlichkeit, Wärme, Willkommen (z.B. ein warmer Platz am Feuer, gemütliche Ecke - KEIN echtes Gasthaus-Gebäude!)',
+			'Höhle': 'Geborgenheit, Rückzug, Geheimnisse (z.B. ein geschützter Winkel, ein überdachter Bereich - KEINE echte Höhle!)',
+			'Feld': 'Weite, Freiheit, Offenheit (z.B. eine Aussicht, offener Himmel - KEIN Getreidefeld!)',
+			'Turm': 'Überblick, Wachsamkeit, Erhabenheit (z.B. ein erhöhter Punkt, Aussichtsplatz - KEIN echtes Turmgebäude!)',
+			'Brücke': 'Verbindung, Übergang, Treffpunkt (z.B. Schwelle zwischen Bereichen - KEINE echte Brücke!)',
+			'Wildnis': 'Ungezähmt, wild wuchernd, chaotisch (z.B. üppige Pflanzen, Efeu - nicht unbedingt echter Wald!)',
+			'Ödland': 'Verlassenheit, Stille, Leere (z.B. verlassene Ecken, verwelkte Pflanzen)',
+			'Garten': 'Pflege, Wachstum, Kultivierung (z.B. gepflegte Ecken, blühende Details)',
+			'Fluss': 'Fluss des Lebens, Bewegung, Veränderung (z.B. fließende Elemente, Dynamik)',
+			'Berg': 'Herausforderung, Beständigkeit, Größe (z.B. imposante Elemente, Erhabenheit)',
+			'See': 'Ruhe, Tiefe, Spiegelung (z.B. stille Wasserflächen, reflektierende Oberflächen)',
+			'Wald': 'Geheimnis, Schutz, Verborgenheit (z.B. schattige Bereiche, dichte Vegetation)',
+			'Dorf': 'Gemeinschaft, Heimat, Zusammengehörigkeit (z.B. gesellige Atmosphäre)',
+			'Markt': 'Austausch, Vielfalt, Lebendigkeit (z.B. buntes Treiben, verschiedene Waren)',
+			'Tempel': 'Spiritualität, Ehrfurcht, Heiligkeit (z.B. besondere Atmosphäre, Ruhe)',
+			'Ruine': 'Vergänglichkeit, Geschichte, Melancholie (z.B. Spuren der Zeit, Moos und Efeu)'
+		};
+
+		const relevanteBeispiele = metaphorischeNaturelle
+			.map(n => {
+				const beispiel = metaphorischBeispiele[n.name];
+				if (beispiel) {
+					return `   - "${n.name}" METAPHORISCH = ${beispiel}`;
+				}
+				return `   - "${n.name}" METAPHORISCH = Zeige die ESSENZ und STIMMUNG, NICHT das wörtliche Objekt!`;
+			})
+			.join('\n');
+
+		metaphorischHinweis = `
+2. METAPHORISCH-Naturelle: SEHR WICHTIG für diesen Ort!
+   Die folgenden Naturelle sind METAPHORISCH gemeint - zeige ihre ESSENZ/STIMMUNG, NICHT das wörtliche Objekt:
+${relevanteBeispiele}
+`;
+	}
+
+	const prompt = `Du bist ein kreativer Szenen-Designer für ein Märchen-Rollenspiel mit anthropomorphen Tierwesen (wie bei Beatrix Potter, Fritz Baumgarten - Mäuse, Hasen, Füchse, Igel, Vögel etc. die aufrecht gehen und Kleidung tragen).
 
 AUFGABE: Beschreibe eine konkrete, bildhafte Szene für einen Ort namens "${ort.name}".
 
@@ -542,17 +638,27 @@ NATURELLE (Orts-Aspekte):
 ${naturelleContext}${regionContext}${anmerkungenContext}
 
 WICHTIGE REGELN:
-1. HAUPT-Naturell: Das ist das dominante Thema der Szene
-2. METAPHORISCH-Naturell: Zeige die ESSENZ, nicht das Wörtliche!
-   - "Feld" metaphorisch = Weite, Freiheit, Ruhe (z.B. eine Bank mit Aussicht, nicht ein Getreidefeld)
-   - "Ödland" metaphorisch = Verlassenheit, Stille (z.B. verlassene Ecken, verwelkte Pflanzen)
-   - "Wildnis" metaphorisch = ungezähmte Natur, Chaos (z.B. Efeu das alles überwuchert)
-3. ALLE Naturelle müssen sichtbar in der Szene vorkommen
-4. Integriere die Region-Features natürlich in die Szene
-5. Keine Personen oder anthropomorphe Tiere - nur Landschaft, Gebäude, kleine Tiere (Insekten, Vögel, Frösche)
 
-Beschreibe in 2-3 Sätzen auf ENGLISCH eine konkrete, visuelle Szene die alle Elemente vereint.
-Antworte NUR mit der Szenen-Beschreibung, keine Erklärungen.`;
+1. HAUPT-Naturell: Das ist das dominante Thema der Szene
+${metaphorischHinweis}
+3. BEWOHNTE ORTE: Entscheide selbst ob dies ein Ort ist, wo Fabelwesen leben/arbeiten würden:
+   - Bei Gasthäusern, Werkstätten, Märkten, Dörfern, Herbergen, Läden: JA, zeige 1-3 anthropomorphe Tierwesen (Mäuse, Hasen, Igel, Dachse etc.) bei ihrer Tätigkeit
+   - Bei reiner Wildnis, unbewohnten Ruinen, abgelegenen Naturorten: NEIN, nur Landschaft und kleine echte Tiere
+
+4. ALLE Naturelle müssen in der Szene erkennbar sein${metaphorischeNaturelle.length > 0 ? ' (bei metaphorischen durch ihre Essenz/Stimmung)' : ''}
+
+5. Integriere die Region-Features natürlich in die Szene
+
+ANTWORTFORMAT (genau so!):
+NAME: [Ein passender deutscher Ort-Name, der zur Szene passt - besonders wichtig wenn Naturelle metaphorisch sind!]
+SZENE: [2-3 Sätze auf ENGLISCH die die visuelle Szene beschreiben]
+
+Beispiele für gute Namen:
+- Bei metaphorischem "Gasthaus" + Wald: "Die Gemütliche Lichtung" oder "Fuchsbaus Rastplatz"
+- Bei metaphorischer "Höhle" + See: "Die Stille Bucht" oder "Moosiges Versteck"
+- Bei wörtlichem Gasthaus: "Zur Goldenen Eichel" oder "Igels Schänke"
+
+Wenn Fabelwesen vorkommen, beschreibe sie kurz (z.B. "a kindly hedgehog innkeeper", "a mouse family by the fire").`;
 
 	console.log(`[Gemini] 📝 Gesendeter Prompt:`);
 	console.log(prompt);
@@ -563,24 +669,48 @@ Antworte NUR mit der Szenen-Beschreibung, keine Erklärungen.`;
 		throw new Error(result.error || 'Szenen-Generierung fehlgeschlagen');
 	}
 
-	const sceneDescription = result.text.trim();
+	const responseText = result.text.trim();
 
-	// Build the final image prompt
-	const promptForImage = `Create a colorful hand-drawn landscape illustration in the style of Fritz Baumgarten (German children's book illustration, fairy-tale like, warm, detailed, watercolor-style). Do NOT include any text, labels, titles, or words in the image. Do NOT include any humanoid characters or anthropomorphic animals - but DO include small natural creatures like butterflies, dragonflies, bees, frogs, birds, or fish if they fit the atmosphere.
+	// Parse NAME and SZENE from response
+	let suggestedName = ort.name; // Fallback to original name
+	let sceneDescription = responseText;
+
+	const nameMatch = responseText.match(/NAME:\s*(.+?)(?:\n|SZENE:|$)/i);
+	const szeneMatch = responseText.match(/SZENE:\s*(.+)/is);
+
+	if (nameMatch && nameMatch[1]) {
+		suggestedName = nameMatch[1].trim().replace(/^["']|["']$/g, ''); // Remove quotes if present
+	}
+
+	if (szeneMatch && szeneMatch[1]) {
+		sceneDescription = szeneMatch[1].trim();
+	} else if (nameMatch) {
+		// If we found NAME but no SZENE marker, take everything after NAME line
+		sceneDescription = responseText.replace(/NAME:\s*.+?\n/i, '').trim();
+	}
+
+	console.log(`[Gemini] 🏷️ Vorgeschlagener Name: ${suggestedName}`);
+	console.log(`[Gemini] 🎭 Szene: ${sceneDescription.substring(0, 100)}...`);
+
+	// Build the final image prompt with the new name
+	const promptForImage = `Create a colorful hand-drawn illustration in the style of Fritz Baumgarten and Beatrix Potter (German/English children's book illustration, fairy-tale like, warm, detailed, watercolor-style). Do NOT include any text, labels, titles, or words in the image.
 
 The scene: ${sceneDescription}
 
-This is a magical place called "${ort.name}".
+This is a magical place called "${suggestedName}" in a world of anthropomorphic animals.
+
+IMPORTANT: If the scene description mentions anthropomorphic animals (innkeepers, travelers, families etc.), include them as cute, clothed animal characters (mice, hedgehogs, rabbits, badgers, foxes etc.) going about their activities. They should be small and integrated naturally into the scene, not the main focus.
+
+Also include small natural creatures like butterflies, dragonflies, bees, frogs, birds where appropriate.
 
 Style: Fairy-tale German children's book illustration like Fritz Baumgarten.
 Wide panoramic landscape orientation, horizontal format.
 Warm, inviting colors with soft lighting.`;
 
-	console.log(`[Gemini] 🎭 Szene generiert: ${sceneDescription.substring(0, 100)}...`);
-
 	return {
 		sceneDescription,
-		promptForImage
+		promptForImage,
+		suggestedName
 	};
 }
 

@@ -664,6 +664,32 @@ export interface Chimaere {
 	unten: string; // Unterer/hinterer Teil
 }
 
+// Verbundene Bekannte (Mündel, Hummeln, etc.)
+export interface VerbundenerBekannter {
+	id: string;
+	typ: 'muendel' | 'hummel';
+}
+
+export interface Muendel extends VerbundenerBekannter {
+	typ: 'muendel';
+	name: string;
+	tier: string;
+	geschlecht: Geschlecht;
+	berufe: string[];
+	merkmal: Merkmal;
+	kategorie: string;
+	beschreibung: string; // z.B. "Ein junger Hase"
+	bild?: string;
+}
+
+export interface Hummel extends VerbundenerBekannter {
+	typ: 'hummel';
+	name: string;
+	aussehen: string; // z.B. "samtig-goldene Streifen", "winzige Flügel mit Regenbogenschimmer"
+	persoenlichkeit: string; // z.B. "neugierig und verspielt", "schüchtern aber fleißig"
+	bild?: string; // Optional: generiertes Bild als Base64 Data URL
+}
+
 export interface GenerierterBekannter {
 	name: string;
 	tier: string;
@@ -675,6 +701,8 @@ export interface GenerierterBekannter {
 	charakterKlasse?: CharakterKlasse; // Optional: für Spielercharaktere
 	bild?: string; // Optional: generiertes Bild als Base64 Data URL
 	zitate?: string[]; // Optional: generierte Zitate (max 3)
+	istHeld?: boolean; // Optional: markiert diesen Charakter als Held der Geschichte
+	verbundeneBekannte?: VerbundenerBekannter[]; // Mündel, Hummeln, etc.
 }
 
 export interface CharakterKlasse {
@@ -776,5 +804,144 @@ export function generiereBekanntenData(erlaubeMagisch: boolean, erlaubeTrauma: b
 		merkmal,
 		kategorie: kategorie.name,
 		geschlecht
+	};
+}
+
+// ==========================================
+// Verbundene Bekannte Generatoren
+// ==========================================
+
+// Hummel-Namen: märchenhaft und summig
+const hummelNamen = [
+	// Blumig/Natürlich
+	'Brummelchen', 'Honigflügel', 'Blütenstub', 'Sonnentau', 'Wiesensumm',
+	'Pollenherz', 'Kleeblatt', 'Blütenstaub', 'Nektarchen', 'Tauperle',
+	// Charaktervoll
+	'Flauschig', 'Plüschpopo', 'Wuschel', 'Knuddel', 'Brummbär',
+	'Tapsig', 'Kugelrund', 'Samtig', 'Pelzig', 'Wollig',
+	// Klangvoll/Summend
+	'Summelinde', 'Brummhilde', 'Summfried', 'Brummbald', 'Zirpeline',
+	'Hummelore', 'Brummelbert', 'Summeline', 'Brummeline', 'Hummrich',
+	// Märchenhaft
+	'Glitzerschwinge', 'Mondflügel', 'Sternenstaub', 'Traumsumm', 'Feenfreund',
+	'Zauberflug', 'Wunderpollen', 'Märchenflügel', 'Elfenhummel', 'Wichtelbrumm'
+];
+
+const hummelAussehen = [
+	// Klassisch mit Twist
+	'samtig-goldene Streifen auf flauschigem Pelz',
+	'tiefschwarzer Samt mit honigfarbenen Ringen',
+	'cremeweiße Tupfen auf zimtbraunem Fell',
+	// Märchenhaft
+	'winzige Flügel mit Regenbogenschimmer',
+	'Streifen, die im Mondlicht silbern leuchten',
+	'Pelz wie aus gesponnenem Sonnenlicht',
+	'durchscheinende Flügel mit goldenen Adern',
+	'Fell so weich wie Wolken, mit Lavendelschimmer',
+	// Besonders
+	'ein einzelner weißer Fleck in Herzform',
+	'ungewöhnlich große, ausdrucksvolle Augen',
+	'Antennen mit kleinen goldenen Kügelchen',
+	'besonders flauschige Pollenhöschen',
+	'ein winziger Honigfleck am Flügel',
+	'Streifen in ungewöhnlichem Rosaton',
+	'Flügel mit feinem Sternenmuster',
+	'kugelrunder Körper mit Samthaar'
+];
+
+const hummelPersoenlichkeiten = [
+	// Positiv
+	'neugierig und verspielt, immer auf Entdeckungsreise',
+	'fleißig und zuverlässig, summt beim Arbeiten',
+	'sanftmütig und geduldig, tröstet andere',
+	'mutig trotz kleiner Größe, furchtlos bei Abenteuern',
+	// Charmant
+	'verschlafen und träumerisch, liebt Nickerchen in Blüten',
+	'naseweis und vorlaut, hat immer eine Meinung',
+	'schüchtern aber fleißig, versteckt sich hinter anderen',
+	'tollpatschig und liebenswert, landet oft kopfüber',
+	// Eigenartig
+	'sammelt seltsame Dinge, nicht nur Pollen',
+	'summt alte Melodien, die niemand kennt',
+	'freundet sich mit allem an, auch mit Regentropfen',
+	'sehr ernst und würdevoll für eine so kleine Hummel',
+	'übermäßig beschützend gegenüber der Kolonie',
+	'philosophisch veranlagt, grübelt über das Brummen nach',
+	'tanzt bei jedem Wetter, auch im Regen',
+	'liebt Geschichten und lauscht heimlich Gesprächen'
+];
+
+export function generiereHummel(): Hummel {
+	return {
+		id: crypto.randomUUID(),
+		typ: 'hummel',
+		name: getRandomElement(hummelNamen),
+		aussehen: getRandomElement(hummelAussehen),
+		persoenlichkeit: getRandomElement(hummelPersoenlichkeiten)
+	};
+}
+
+// Kleine Tierwesen für Mündel (Kinder/Jungtiere)
+const kleineTierwesen = [
+	'Mäuschen', 'Häschen', 'Eichhörnchen', 'Igel', 'Dachs',
+	'Fuchs', 'Otter', 'Biber', 'Fröschlein', 'Kätzchen',
+	'Welpe', 'Entenküken', 'Gänseküken', 'Spatzenküken', 'Eulenküken',
+	'Ferkel', 'Lämmchen', 'Rehkitz', 'Käfer', 'Raupe',
+	'Wichtel', 'Kobold', 'Gnom', 'Elfe', 'Fee'
+];
+
+const kinderNamenWeiblich = [
+	'Lila', 'Mila', 'Ella', 'Nele', 'Leni', 'Mia', 'Pia', 'Lia',
+	'Ronja', 'Freya', 'Ida', 'Ava', 'Emmi', 'Anni', 'Lotte', 'Grete',
+	'Momo', 'Pippi', 'Kiki', 'Feli', 'Finja', 'Maja', 'Luna', 'Stella',
+	'Blümchen', 'Sonnenstrahl', 'Kleines Wölkchen', 'Tautröpfchen'
+];
+
+const kinderNamenMaennlich = [
+	'Finn', 'Max', 'Leo', 'Ben', 'Tom', 'Jan', 'Tim', 'Nik',
+	'Milo', 'Theo', 'Emil', 'Oskar', 'Anton', 'Fritz', 'Hugo', 'Otto',
+	'Puck', 'Pan', 'Til', 'Pit', 'Knut', 'Bjorn', 'Lars', 'Sven',
+	'Knöpfchen', 'Kleiner Stern', 'Krümel', 'Wirbelwind'
+];
+
+export function generiereMuendel(erlaubeMagisch: boolean = true, erlaubeTrauma: boolean = false): Muendel {
+	// Wähle ein "kindliches" oder kleines Tierwesen
+	const tier = getRandomElement(kleineTierwesen);
+	const geschlecht: Geschlecht = Math.random() < 0.5 ? 'weiblich' : 'männlich';
+
+	// Name basierend auf Geschlecht
+	const name = geschlecht === 'weiblich'
+		? getRandomElement(kinderNamenWeiblich)
+		: getRandomElement(kinderNamenMaennlich);
+
+	// Kindgerechte Kategorien (keine Trauma-Merkmale für Mündel)
+	const kindgerechteKategorien = alleKategorien.map(kat => ({
+		...kat,
+		merkmale: kat.merkmale.filter(m => {
+			if (!erlaubeMagisch && m.magisch) return false;
+			return true;
+		})
+	})).filter(kat => kat.merkmale.length > 0);
+
+	const kategorie = getRandomElement(kindgerechteKategorien);
+	const merkmal = getRandomElement(kategorie.merkmale);
+
+	// Kindgerechte Berufe (nur einer)
+	const beruf = getRandomElement(merkmal.berufe);
+
+	// Beschreibung generieren
+	const beschreibungPrefix = geschlecht === 'weiblich' ? 'Eine kleine' : 'Ein kleiner';
+	const beschreibung = `${beschreibungPrefix} ${tier}, ${merkmal.beschreibung.charAt(0).toLowerCase()}${merkmal.beschreibung.slice(1)}`;
+
+	return {
+		id: crypto.randomUUID(),
+		typ: 'muendel',
+		name,
+		tier,
+		geschlecht,
+		berufe: [beruf],
+		merkmal,
+		kategorie: kategorie.name,
+		beschreibung
 	};
 }

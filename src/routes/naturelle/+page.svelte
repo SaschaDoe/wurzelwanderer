@@ -310,17 +310,25 @@
 				region: getRegionInfoForImage()
 			};
 
-			// Phase 1: Generate scene description with LLM
+			// Phase 1: Generate scene description with LLM (includes suggested name)
 			const sceneResult = await generateSceneDescription(ortInfo);
 			sceneDescription = sceneResult.sceneDescription;
 
+			// Update name if a better one was suggested
+			const neuerName = sceneResult.suggestedName || generierterOrt.name;
+
 			// Phase 2: Generate image from scene prompt
 			generationPhase = 'image';
-			const imageData = await generateImageFromPrompt(sceneResult.promptForImage, generierterOrt.name);
+			const imageData = await generateImageFromPrompt(sceneResult.promptForImage, neuerName);
 
 			if (imageData) {
 				const neueBilder = [...(generierterOrt.bilder || []), imageData];
-				generierterOrt = { ...generierterOrt, bilder: neueBilder, szenenBeschreibung: sceneDescription || undefined };
+				generierterOrt = {
+					...generierterOrt,
+					name: neuerName, // Update to suggested name
+					bilder: neueBilder,
+					szenenBeschreibung: sceneDescription || undefined
+				};
 				galerieIndex = neueBilder.length - 1;
 				anmerkungenExpanded = false;
 				syncAktuellenOrt();
@@ -386,6 +394,26 @@
 			bekannte: generierterOrt.bekannte.map((b, i) => i === index ? updated : b)
 		};
 		syncAktuellenOrt();
+	}
+
+	function aktualisiereOrtName(event: Event) {
+		if (!generierterOrt) return;
+		const target = event.target as HTMLElement;
+		const neuerName = target.innerText.trim();
+		if (neuerName && neuerName !== generierterOrt.name) {
+			generierterOrt = {
+				...generierterOrt,
+				name: neuerName
+			};
+			syncAktuellenOrt();
+		}
+	}
+
+	function handleKeyDown(event: KeyboardEvent) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			(event.target as HTMLElement).blur();
+		}
 	}
 
 	function generiereOrt() {
@@ -623,7 +651,13 @@
 		<div class="result-section" class:bearbeitung={bearbeitungsModus}>
 			<!-- Header mit Name -->
 			<div class="result-header">
-				<h2 class="result-title">{generierterOrt.name}</h2>
+				<h2
+					class="result-title"
+					contenteditable="true"
+					onblur={aktualisiereOrtName}
+					onkeydown={handleKeyDown}
+					title="Klicken zum Bearbeiten"
+				>{generierterOrt.name}</h2>
 				{#if bearbeitungsModus}
 					<span class="bearbeitung-badge">Bearbeitung</span>
 				{/if}
@@ -777,6 +811,7 @@
 							<div class="bekannte-item">
 								<BekannterCard
 									{bekannter}
+									editable={true}
 									onUpdate={(updated) => aktualisiereBekannten(index, updated)}
 									ortContext={generierterOrt ? { name: generierterOrt.name, naturelleNames: generierterOrt.naturelle.map(n => n.name) } : undefined}
 									regionContext={getRegionInfoForImage()}
@@ -1108,6 +1143,20 @@
 		margin: 0;
 		color: var(--color-earth-dark);
 		text-align: center;
+		cursor: text;
+		padding: var(--space-xs) var(--space-sm);
+		border-radius: var(--radius-sm);
+		transition: background-color 0.2s ease;
+		outline: none;
+	}
+
+	.result-title:hover {
+		background-color: rgba(139, 119, 101, 0.1);
+	}
+
+	.result-title:focus {
+		background-color: rgba(139, 119, 101, 0.15);
+		box-shadow: 0 0 0 2px var(--color-earth-light);
 	}
 
 	.result-naturelle {

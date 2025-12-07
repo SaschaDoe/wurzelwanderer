@@ -2,6 +2,17 @@
  * Character class data for Wurzelbücher (hero generation).
  */
 
+export type VerbundenerTyp = 'muendel' | 'hummel';
+
+export interface VerbundeneBekannteConfig {
+	typ: VerbundenerTyp;
+	label: string; // z.B. "Mündel", "Hummel"
+	labelPlural: string; // z.B. "Mündel", "Hummeln"
+	buttonText: string; // z.B. "Mündel hinzufügen", "Hummel hinzufügen"
+	maxAnzahl?: number; // Optional: Begrenzung (undefined = unbegrenzt)
+	startAnzahl?: number; // Optional: Anzahl bei Charaktererstellung (default 1)
+}
+
 export interface CharakterKlasseData {
 	name: string;
 	bild: string;
@@ -15,6 +26,7 @@ export interface CharakterKlasseData {
 	besonders: string;
 	warnung?: string;
 	farbe: string;
+	verbundeneBekannte?: VerbundeneBekannteConfig;
 }
 
 export const charaktere: CharakterKlasseData[] = [
@@ -29,7 +41,15 @@ export const charaktere: CharakterKlasseData[] = [
 			ausgeben: 'Lass dein Mündel etwas selbst machen'
 		},
 		besonders: 'Eine Lektion ableiten',
-		farbe: 'earth'
+		farbe: 'earth',
+		verbundeneBekannte: {
+			typ: 'muendel',
+			label: 'Mündel',
+			labelPlural: 'Mündel',
+			buttonText: 'Mündel erstellen',
+			maxAnzahl: 1,
+			startAnzahl: 1
+		}
 	},
 	{
 		name: 'Exilant*in',
@@ -83,5 +103,25 @@ export const charaktere: CharakterKlasseData[] = [
 		besonders: 'Über deine Gefühle reden',
 		warnung: 'Wenn du dein Schwert ziehst, darfst du nie wieder Veteran*in spielen!',
 		farbe: 'winter'
+	},
+	{
+		name: 'Hummelhirt*in',
+		bild: '/images/charaktere/page65_img1.png',
+		beschreibung: 'Du hütest einen kleinen Schwarm von Hummeln. Sie arbeiten für dich und du sorgst für sie.',
+		frage: 'Wie habe ich meine erste Hummel bekommen?',
+		tokens: {
+			anderer: 'Gib einer Baby-Hummel einen Namen und eine Persönlichkeit und schenke ihr Aufmerksamkeit',
+			selbst: 'Handle etwas von deinen Hummeln Erarbeitetes gegen etwas, was dir Freude bereitet',
+			ausgeben: 'Jemand kann dir mit den Hummeln zur Hand gehen'
+		},
+		besonders: 'Mit deinen Hummeln etwas Unerwartetes erreichen',
+		farbe: 'summer',
+		verbundeneBekannte: {
+			typ: 'hummel',
+			label: 'Hummel',
+			labelPlural: 'Hummeln',
+			buttonText: 'Hummel hinzufügen',
+			startAnzahl: 1
+		}
 	}
 ];
