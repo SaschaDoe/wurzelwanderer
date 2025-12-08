@@ -118,11 +118,20 @@
 		return ausgewaehlteCharaktere.some((c) => c.name === charakter.name);
 	}
 
-	async function generiereNeuenCharakter() {
+	async function generiereNeuenCharakter(alsHeld: boolean = false) {
 		const neuer = generiereBekanntenData(true, false);
+		if (alsHeld) {
+			neuer.istHeld = true;
+		}
 		generierteCharaktere = [...generierteCharaktere, neuer];
 		ausgewaehlteCharaktere = [...ausgewaehlteCharaktere, neuer];
 		await saveWizardCharaktere();
+	}
+
+	function istHeld(charakter: GenerierterBekannter): boolean {
+		// Check if it's the saved hero OR has istHeld flag
+		return charakter.istHeld === true ||
+			(gespeicherterHeld !== null && charakter.name === gespeicherterHeld.name);
 	}
 
 	function showCharakterDetails(charakter: GenerierterBekannter) {
@@ -259,6 +268,9 @@
 						class:selected={istAusgewaehlt(aktuellerBekannter)}
 						onclick={() => toggleCharakter(aktuellerBekannter!)}
 					>
+						{#if istHeld(aktuellerBekannter)}
+							<span class="hero-badge">Held</span>
+						{/if}
 						<div class="char-avatar">
 							{#if aktuellerBekannter.bild}
 								<img src={aktuellerBekannter.bild} alt={aktuellerBekannter.name} class="avatar-img" />
@@ -291,6 +303,9 @@
 						class:selected={istAusgewaehlt(char)}
 						onclick={() => toggleCharakter(char)}
 					>
+						{#if istHeld(char)}
+							<span class="hero-badge">Held</span>
+						{/if}
 						<div class="char-avatar">
 							{#if char.bild}
 								<img src={char.bild} alt={char.name} class="avatar-img" />
@@ -316,10 +331,16 @@
 				</div>
 			{/each}
 
-			<button class="character-card add-card" onclick={generiereNeuenCharakter}>
-				<span class="add-icon">+</span>
-				<span>Neuen Charakter generieren</span>
-			</button>
+			<div class="add-buttons">
+				<button class="character-card add-card add-held" onclick={() => generiereNeuenCharakter(true)}>
+					<span class="add-icon">+</span>
+					<span>Held generieren</span>
+				</button>
+				<button class="character-card add-card" onclick={() => generiereNeuenCharakter(false)}>
+					<span class="add-icon">+</span>
+					<span>Bekannten generieren</span>
+				</button>
+			</div>
 		</div>
 
 		{#if ausgewaehlteCharaktere.length > 0}
@@ -511,6 +532,20 @@
 	.character-card.add-card:hover {
 		color: var(--color-leaf-dark);
 		border-color: var(--color-leaf);
+	}
+
+	.character-card.add-card.add-held {
+		border-color: var(--color-sunset);
+		color: var(--color-sunset);
+	}
+
+	.character-card.add-card.add-held:hover {
+		border-color: var(--color-sunset);
+		background: rgba(192, 117, 78, 0.1);
+	}
+
+	.add-buttons {
+		display: contents;
 	}
 
 	.char-avatar {

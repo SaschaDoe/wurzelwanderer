@@ -22,5 +22,8 @@ export const IMAGE_MODELS = [
 	'gemini-2.5-flash-image' // Fast "Nano Banana" - stable fallback
 ] as const;
 
+/** Delay in ms before retrying after a 429 rate limit error */
+export const RATE_LIMIT_RETRY_DELAY_MS = 15_000; // 15 seconds
+
 /** Type for available image models */
 export type ImageModel = (typeof IMAGE_MODELS)[number];

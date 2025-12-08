@@ -20,6 +20,8 @@ export const STORAGE_KEYS = {
 	HELD: 'wurzelwanderer-held',
 	/** Gemini API key for image generation */
 	API_KEY: 'wurzelwanderer-gemini-api-key',
+	/** OpenAI API key for text generation (GPT-5.1) */
+	OPENAI_API_KEY: 'wurzelwanderer-openai-api-key',
 	/** Saved regions containing locations */
 	REGIONEN: 'wurzelwanderer-regionen',
 	/** Currently active region ID */
@@ -28,6 +30,12 @@ export const STORAGE_KEYS = {
 	BILDBAENDE: 'wurzelwanderer-bildbaende',
 	/** Generated characters in the Bildband wizard */
 	WIZARD_CHARAKTERE: 'wurzelwanderer-wizard-charaktere',
+	/** Saved deities (Gottheiten) */
+	GOTTHEITEN: 'wurzelwanderer-gottheiten',
+	/** Saved hex maps */
+	HEXMAPS: 'wurzelwanderer-hexmaps',
+	/** Currently active hexmap ID */
+	AKTIVE_HEXMAP: 'wurzelwanderer-aktive-hexmap',
 	/** Migration marker */
 	MIGRATED: 'wurzelwanderer-migrated-to-idb'
 } as const;

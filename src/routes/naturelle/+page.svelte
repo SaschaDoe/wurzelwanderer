@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { generateSceneDescription, generateImageFromPrompt, hasApiKey, initApiKey, type RegionInfo, type SceneGenerationResult } from '$lib/services/geminiService';
+	import { generateSceneDescription, generateImageFromPrompt, hasApiKey, initApiKey, generateOrtDetails, generateOrtGeschichte, generateOrtBeschreibung, generateSpielleiterAntwort, fasseSpielleiterChatZusammen, type RegionInfo, type SceneGenerationResult, type OrtDetailsResult, type OrtGeschichteEvent as GeminiOrtGeschichteEvent, type SpielleiterKontext, type SpielleiterChatNachricht, generateGottheitVorgeschichte, generateGottheitBild, generateGottheitFähigkeiten, generateGottheitOpferweg } from '$lib/services/geminiService';
 	import BekannterCard from '$lib/components/BekannterCard.svelte';
+	import GottheitCard from '$lib/components/GottheitCard.svelte';
 	import ImageGalleryModal from '$lib/components/ImageGalleryModal.svelte';
 	import RegionCard from '$lib/components/RegionCard.svelte';
 	import RegionEditor from '$lib/components/RegionEditor.svelte';
 	import { generiereBekanntenData, type GenerierterBekannter } from '$lib/data/merkmale';
+	import { type Gottheit, type OrtKontext, erstelleGottheit, generiereGottheitData } from '$lib/data/gottheiten';
 	import { STORAGE_KEYS, getStoredItem, setStoredItem, getStoredString, setStoredString } from '$lib/utils/storage';
 	import { toElementId } from '$lib/utils/slugify';
 	import { getRandomElement, getRandomElements } from '$lib/utils/random';
@@ -26,15 +28,38 @@
 
 	// Type definitions
 
+	interface OrtGeschichteEvent {
+		jahr?: string;
+		event: string;
+	}
+
+	interface OrtDetails {
+		geruechte: string[];
+		aktivitaeten: string[];
+		entdeckungen: string[];
+	}
+
+	interface SpielleiterNachricht {
+		id: string;
+		rolle: 'nutzer' | 'spielleiter';
+		text: string;
+		timestamp: string;
+		vorgeschlageneFakten?: string[]; // Fakten die der Spielleiter in dieser Nachricht vorschlägt
+		akzeptierteFakten?: string[]; // Welche davon wurden akzeptiert
+	}
+
 	interface GespeicherterOrt {
 		id: string;
 		regionId: string;
 		name: string;
 		bilder?: string[];
 		hauptNaturell?: string;
-		anmerkungen?: string;
-		szenenBeschreibung?: string;
+		ortBeschreibung?: string; // Interpretation/Bedeutung des Ortes (editierbar)
+		anmerkungen?: string; // Visuelle Details für das Bild
+		beschreibungsAnmerkungen?: string; // Nutzer-Anmerkungen für die KI-Beschreibung
+		szenenBeschreibung?: string; // Generierter Bild-Prompt (intern)
 		bekannte: GenerierterBekannter[];
+		gottheiten?: Gottheit[]; // Lokale Gottheiten für diesen Ort
 		naturelle: Array<{
 			name: string;
 			bild: string;
@@ -48,6 +73,12 @@
 			metaphorisch?: boolean;
 		}>;
 		erstelltAm: string;
+		// Generierte Details
+		details?: OrtDetails;
+		geschichte?: OrtGeschichteEvent[];
+		// Spielleiter-Chat
+		spielleiterChat?: SpielleiterNachricht[];
+		spielleiterFakten?: string; // Zusammengefasste Fakten aus früheren Konversationen
 	}
 
 	// Generator State
@@ -80,9 +111,36 @@
 	let showImageModal = $state(false);
 	let galerieIndex = $state(0);
 	let anmerkungenExpanded = $state(true);
+	let beschreibungsAnmerkungenExpanded = $state(false);
 
 	// Bekannte state
 	let anzahlBekannte = $state(2);
+
+	// Gottheiten state
+	let isGeneratingGottheitBild = $state<string | null>(null); // ID der Gottheit die gerade ein Bild generiert
+	let isGeneratingGottheitVorgeschichte = $state<string | null>(null); // ID der Gottheit die gerade eine Vorgeschichte generiert
+	let isGeneratingGottheitFähigkeiten = $state<string | null>(null); // ID der Gottheit die gerade Fähigkeiten generiert
+	let isGeneratingGottheitOpferweg = $state<string | null>(null); // ID der Gottheit die gerade einen Opferweg generiert
+
+	// Ort-Beschreibung (interpretation) state
+	let isGeneratingBeschreibung = $state(false);
+	let beschreibungError = $state<string | null>(null);
+	let beschreibungExpanded = $state(false); // Collapsed by default, shows text directly
+
+	// Ort details & history generation state
+	let isGeneratingDetails = $state(false);
+	let isGeneratingGeschichte = $state(false);
+	let detailsError = $state<string | null>(null);
+	let geschichteError = $state<string | null>(null);
+	let geschichteExpanded = $state(false);
+
+	// Spielleiter-Chat state
+	let spielleiterChatExpanded = $state(false);
+	let spielleiterInput = $state('');
+	let isSpielleiterGenerating = $state(false);
+	let spielleiterError = $state<string | null>(null);
+	let isZusammenfassend = $state(false);
+	let showFaktenModal = $state(false);
 
 	// Debounce timer for anmerkungen
 	let anmerkungenSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -115,15 +173,38 @@
 		// Load orte
 		const saved = await getStoredItem<GespeicherterOrt[]>(STORAGE_KEYS.ORTE);
 		if (saved) {
-			// Migration: assign regionId to orte that don't have one
-			const migratedOrte = saved.map(ort => ({
-				...ort,
-				regionId: ort.regionId || HEIMATGEFILDE_ID
-			}));
+			// Build lookup map for original naturelle data
+			const naturellBildMap = new Map<string, string>();
+			for (const kat of kategorien) {
+				for (const nat of kat.naturelle) {
+					naturellBildMap.set(nat.name, nat.bild);
+				}
+			}
+
+			// Migration: assign regionId and restore missing bild properties
+			let needsSave = false;
+			const migratedOrte = saved.map(ort => {
+				const migratedNaturelle = ort.naturelle.map(nat => {
+					if (!nat.bild && naturellBildMap.has(nat.name)) {
+						needsSave = true;
+						return { ...nat, bild: naturellBildMap.get(nat.name)! };
+					}
+					return nat;
+				});
+
+				if (!ort.regionId) needsSave = true;
+
+				return {
+					...ort,
+					regionId: ort.regionId || HEIMATGEFILDE_ID,
+					naturelle: migratedNaturelle
+				};
+			});
 			gespeicherteOrte = migratedOrte;
 
 			// Save migrated data if needed
-			if (saved.some(ort => !ort.regionId)) {
+			if (needsSave) {
+				console.log('[Migration] Restauriere fehlende Naturelle-Bilder...');
 				await setStoredItem(STORAGE_KEYS.ORTE, migratedOrte);
 			}
 		}
@@ -283,6 +364,237 @@
 		anmerkungenSyncTimer = setTimeout(() => syncAktuellenOrt(), 500);
 	}
 
+	// Debounce timer for ortBeschreibung
+	let beschreibungSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function updateOrtBeschreibung(event: Event) {
+		if (!generierterOrt) return;
+		const target = event.target as HTMLTextAreaElement;
+		generierterOrt = { ...generierterOrt, ortBeschreibung: target.value };
+
+		// Debounced sync - save after 500ms of no typing
+		if (beschreibungSyncTimer) clearTimeout(beschreibungSyncTimer);
+		beschreibungSyncTimer = setTimeout(() => syncAktuellenOrt(), 500);
+	}
+
+	// Debounce timer for beschreibungsAnmerkungen
+	let beschreibungsAnmerkungenSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function updateBeschreibungsAnmerkungen(event: Event) {
+		if (!generierterOrt) return;
+		const target = event.target as HTMLTextAreaElement;
+		generierterOrt = { ...generierterOrt, beschreibungsAnmerkungen: target.value };
+
+		// Debounced sync - save after 500ms of no typing
+		if (beschreibungsAnmerkungenSyncTimer) clearTimeout(beschreibungsAnmerkungenSyncTimer);
+		beschreibungsAnmerkungenSyncTimer = setTimeout(() => syncAktuellenOrt(), 500);
+	}
+
+	function toggleBeschreibungsAnmerkungen() {
+		beschreibungsAnmerkungenExpanded = !beschreibungsAnmerkungenExpanded;
+	}
+
+	// ==========================================
+	// Spielleiter-Chat Funktionen
+	// ==========================================
+
+	function toggleSpielleiterChat() {
+		spielleiterChatExpanded = !spielleiterChatExpanded;
+	}
+
+	function buildSpielleiterKontext(): SpielleiterKontext | null {
+		if (!generierterOrt) return null;
+
+		return {
+			ortName: generierterOrt.name,
+			ortBeschreibung: generierterOrt.ortBeschreibung,
+			naturelle: generierterOrt.naturelle.map(n => ({
+				name: n.name,
+				beschreibung: n.beschreibung
+			})),
+			bekannte: generierterOrt.bekannte.map(b => ({
+				name: b.name,
+				tier: b.tier,
+				beruf: b.berufe[0] || 'Unbekannt',
+				merkmal: b.merkmal.name
+			})),
+			gottheiten: generierterOrt.gottheiten?.map(g => ({
+				name: g.name,
+				titel: g.beiname || g.name,
+				erscheinung: g.erscheinung
+			})),
+			region: aktiveRegion ? { name: aktiveRegion.name } : undefined,
+			details: generierterOrt.details,
+			geschichte: generierterOrt.geschichte,
+			bisherigeFakten: generierterOrt.spielleiterFakten
+		};
+	}
+
+	function getChatVerlaufForApi(): SpielleiterChatNachricht[] {
+		if (!generierterOrt?.spielleiterChat) return [];
+		return generierterOrt.spielleiterChat.map(n => ({
+			rolle: n.rolle,
+			text: n.text
+		}));
+	}
+
+	async function sendeSpielleiterNachricht() {
+		if (!generierterOrt || !spielleiterInput.trim() || isSpielleiterGenerating) return;
+
+		const nachrichtText = spielleiterInput.trim();
+		spielleiterInput = '';
+		isSpielleiterGenerating = true;
+		spielleiterError = null;
+
+		// Add user message
+		const userMessage: SpielleiterNachricht = {
+			id: crypto.randomUUID(),
+			rolle: 'nutzer',
+			text: nachrichtText,
+			timestamp: new Date().toISOString()
+		};
+
+		generierterOrt = {
+			...generierterOrt,
+			spielleiterChat: [...(generierterOrt.spielleiterChat || []), userMessage]
+		};
+
+		try {
+			const kontext = buildSpielleiterKontext();
+			if (!kontext) throw new Error('Kein Ort-Kontext');
+
+			const chatVerlauf = getChatVerlaufForApi();
+			const result = await generateSpielleiterAntwort(kontext, nachrichtText, chatVerlauf.slice(0, -1)); // exclude the just-added message
+
+			if (!result.success || !result.antwort) {
+				throw new Error(result.error || 'Keine Antwort erhalten');
+			}
+
+			// Add spielleiter response
+			const spielleiterMessage: SpielleiterNachricht = {
+				id: crypto.randomUUID(),
+				rolle: 'spielleiter',
+				text: result.antwort,
+				timestamp: new Date().toISOString(),
+				vorgeschlageneFakten: result.vorgeschlageneFakten
+			};
+
+			generierterOrt = {
+				...generierterOrt,
+				spielleiterChat: [...(generierterOrt.spielleiterChat || []), spielleiterMessage]
+			};
+
+			syncAktuellenOrt();
+		} catch (error) {
+			spielleiterError = error instanceof Error ? error.message : 'Unbekannter Fehler';
+		} finally {
+			isSpielleiterGenerating = false;
+		}
+	}
+
+	function akzeptiereFakt(nachrichtId: string, faktIndex: number) {
+		if (!generierterOrt?.spielleiterChat) return;
+
+		generierterOrt = {
+			...generierterOrt,
+			spielleiterChat: generierterOrt.spielleiterChat.map(n => {
+				if (n.id === nachrichtId && n.vorgeschlageneFakten) {
+					const akzeptiert = n.akzeptierteFakten || [];
+					const fakt = n.vorgeschlageneFakten[faktIndex];
+					if (fakt && !akzeptiert.includes(fakt)) {
+						return { ...n, akzeptierteFakten: [...akzeptiert, fakt] };
+					}
+				}
+				return n;
+			})
+		};
+
+		syncAktuellenOrt();
+	}
+
+	function istFaktAkzeptiert(nachricht: SpielleiterNachricht, faktIndex: number): boolean {
+		if (!nachricht.vorgeschlageneFakten || !nachricht.akzeptierteFakten) return false;
+		const fakt = nachricht.vorgeschlageneFakten[faktIndex];
+		return nachricht.akzeptierteFakten.includes(fakt);
+	}
+
+	async function fasseSpielleiterChatZusammenUndLeere() {
+		if (!generierterOrt?.spielleiterChat || generierterOrt.spielleiterChat.length === 0) return;
+		if (isZusammenfassend) return;
+
+		isZusammenfassend = true;
+		spielleiterError = null;
+
+		try {
+			const chatVerlauf = getChatVerlaufForApi();
+			const result = await fasseSpielleiterChatZusammen(
+				chatVerlauf,
+				generierterOrt.spielleiterFakten,
+				generierterOrt.name
+			);
+
+			if (!result.success || !result.zusammenfassung) {
+				throw new Error(result.error || 'Zusammenfassung fehlgeschlagen');
+			}
+
+			// Update with new facts and clear chat
+			generierterOrt = {
+				...generierterOrt,
+				spielleiterFakten: result.zusammenfassung,
+				spielleiterChat: []
+			};
+
+			syncAktuellenOrt();
+		} catch (error) {
+			spielleiterError = error instanceof Error ? error.message : 'Fehler bei Zusammenfassung';
+		} finally {
+			isZusammenfassend = false;
+		}
+	}
+
+	function handleSpielleiterKeydown(event: KeyboardEvent) {
+		if (event.key === 'Enter' && !event.shiftKey) {
+			event.preventDefault();
+			sendeSpielleiterNachricht();
+		}
+	}
+
+	async function generiereOrtBeschreibung() {
+		if (!generierterOrt || isGeneratingBeschreibung) return;
+
+		isGeneratingBeschreibung = true;
+		beschreibungError = null;
+
+		try {
+			const input = {
+				name: generierterOrt.name,
+				naturelle: generierterOrt.naturelle.map(n => ({
+					name: n.name,
+					beschreibung: n.beschreibung,
+					metaphorisch: n.metaphorisch
+				})),
+				region: getRegionInfoForImage(),
+				beschreibungsAnmerkungen: generierterOrt.beschreibungsAnmerkungen
+			};
+
+			const result = await generateOrtBeschreibung(input);
+			generierterOrt = {
+				...generierterOrt,
+				name: result.suggestedName,
+				ortBeschreibung: result.beschreibung
+			};
+			syncAktuellenOrt();
+		} catch (error) {
+			beschreibungError = error instanceof Error ? error.message : 'Unbekannter Fehler';
+		} finally {
+			isGeneratingBeschreibung = false;
+		}
+	}
+
+	function toggleBeschreibung() {
+		beschreibungExpanded = !beschreibungExpanded;
+	}
+
 	async function generateImage() {
 		if (!generierterOrt || isGeneratingImage) return;
 
@@ -307,25 +619,22 @@
 					stimmung: extractStimmungText(n.stimmung)
 				})),
 				anmerkungen: generierterOrt.anmerkungen,
+				ortBeschreibung: generierterOrt.ortBeschreibung,
 				region: getRegionInfoForImage()
 			};
 
-			// Phase 1: Generate scene description with LLM (includes suggested name)
+			// Phase 1: Generate scene description with LLM
 			const sceneResult = await generateSceneDescription(ortInfo);
 			sceneDescription = sceneResult.sceneDescription;
 
-			// Update name if a better one was suggested
-			const neuerName = sceneResult.suggestedName || generierterOrt.name;
-
 			// Phase 2: Generate image from scene prompt
 			generationPhase = 'image';
-			const imageData = await generateImageFromPrompt(sceneResult.promptForImage, neuerName);
+			const imageData = await generateImageFromPrompt(sceneResult.promptForImage, generierterOrt.name);
 
 			if (imageData) {
 				const neueBilder = [...(generierterOrt.bilder || []), imageData];
 				generierterOrt = {
 					...generierterOrt,
-					name: neuerName, // Update to suggested name
 					bilder: neueBilder,
 					szenenBeschreibung: sceneDescription || undefined
 				};
@@ -396,6 +705,163 @@
 		syncAktuellenOrt();
 	}
 
+	// Gottheiten functions
+	function fuegeGottheitHinzu() {
+		if (!generierterOrt) return;
+
+		// Erstelle Ort-Kontext für thematisch inspirierte Gottheit
+		const ortKontext: OrtKontext = {
+			name: generierterOrt.name,
+			naturelleNamen: generierterOrt.naturelle.map(n => n.name),
+			naturelleKategorien: [...new Set(generierterOrt.naturelle.map(n => n.kategorie))],
+			ortBeschreibung: generierterOrt.ortBeschreibung
+		};
+
+		// Erstelle Gottheit mit Ort-Kontext für thematische Inspiration
+		const neueGottheit = erstelleGottheit({ ortId: generierterOrt.id }, ortKontext);
+
+		generierterOrt = {
+			...generierterOrt,
+			gottheiten: [...(generierterOrt.gottheiten || []), neueGottheit]
+		};
+		syncAktuellenOrt();
+	}
+
+	function entferneGottheit(id: string) {
+		if (!generierterOrt) return;
+		generierterOrt = {
+			...generierterOrt,
+			gottheiten: (generierterOrt.gottheiten || []).filter(g => g.id !== id)
+		};
+		syncAktuellenOrt();
+	}
+
+	function aktualisiereGottheit(updated: Gottheit) {
+		if (!generierterOrt) return;
+		generierterOrt = {
+			...generierterOrt,
+			gottheiten: (generierterOrt.gottheiten || []).map(g => g.id === updated.id ? updated : g)
+		};
+		syncAktuellenOrt();
+	}
+
+	async function generiereGottheitBildForOrt(gottheit: Gottheit) {
+		isGeneratingGottheitBild = gottheit.id;
+		try {
+			// Ort-Kontext für das Bild übergeben
+			const ortInfo = generierterOrt ? {
+				name: generierterOrt.name,
+				naturelleNamen: generierterOrt.naturelle.map(n => n.name),
+				ortBeschreibung: generierterOrt.ortBeschreibung
+			} : undefined;
+
+			const bildData = await generateGottheitBild({
+				name: gottheit.name,
+				beiname: gottheit.beiname,
+				domäne: gottheit.domäne,
+				erscheinung: gottheit.erscheinung,
+				fähigkeiten: gottheit.fähigkeiten,
+				opferweg: gottheit.opferweg
+			}, ortInfo);
+			if (bildData) {
+				aktualisiereGottheit({ ...gottheit, bild: bildData });
+			}
+		} catch (error) {
+			console.error('Fehler bei Gottheit-Bild-Generierung:', error);
+		} finally {
+			isGeneratingGottheitBild = null;
+		}
+	}
+
+	async function generiereGottheitVorgeschichteForOrt(gottheit: Gottheit) {
+		isGeneratingGottheitVorgeschichte = gottheit.id;
+		try {
+			// Ort-Kontext für die Vorgeschichte übergeben
+			const ortInfo = generierterOrt ? {
+				name: generierterOrt.name,
+				naturelleNamen: generierterOrt.naturelle.map(n => n.name),
+				ortBeschreibung: generierterOrt.ortBeschreibung
+			} : undefined;
+
+			const result = await generateGottheitVorgeschichte({
+				name: gottheit.name,
+				beiname: gottheit.beiname,
+				domäne: gottheit.domäne,
+				erscheinung: gottheit.erscheinung,
+				fähigkeiten: gottheit.fähigkeiten,
+				opferweg: gottheit.opferweg
+			}, ortInfo);
+			if (result.success && result.vorgeschichte) {
+				aktualisiereGottheit({ ...gottheit, vorgeschichte: result.vorgeschichte });
+			}
+		} catch (error) {
+			console.error('Fehler bei Gottheit-Vorgeschichte-Generierung:', error);
+		} finally {
+			isGeneratingGottheitVorgeschichte = null;
+		}
+	}
+
+	async function generiereGottheitFähigkeitenForOrt(gottheit: Gottheit) {
+		isGeneratingGottheitFähigkeiten = gottheit.id;
+		try {
+			// Ort-Kontext für die Fähigkeiten übergeben
+			const ortInfo = generierterOrt ? {
+				name: generierterOrt.name,
+				naturelleNamen: generierterOrt.naturelle.map(n => n.name),
+				ortBeschreibung: generierterOrt.ortBeschreibung
+			} : undefined;
+
+			const result = await generateGottheitFähigkeiten({
+				name: gottheit.name,
+				beiname: gottheit.beiname,
+				domäne: gottheit.domäne,
+				erscheinung: gottheit.erscheinung
+			}, ortInfo);
+			if (result.success && result.fähigkeiten) {
+				aktualisiereGottheit({ ...gottheit, fähigkeiten: result.fähigkeiten });
+			}
+		} catch (error) {
+			console.error('Fehler bei Gottheit-Fähigkeiten-Generierung:', error);
+		} finally {
+			isGeneratingGottheitFähigkeiten = null;
+		}
+	}
+
+	async function generiereGottheitOpferwegForOrt(gottheit: Gottheit) {
+		isGeneratingGottheitOpferweg = gottheit.id;
+		try {
+			// Ort-Kontext für den Opferweg übergeben
+			const ortInfo = generierterOrt ? {
+				name: generierterOrt.name,
+				naturelleNamen: generierterOrt.naturelle.map(n => n.name),
+				ortBeschreibung: generierterOrt.ortBeschreibung
+			} : undefined;
+
+			const result = await generateGottheitOpferweg({
+				name: gottheit.name,
+				beiname: gottheit.beiname,
+				domäne: gottheit.domäne,
+				erscheinung: gottheit.erscheinung
+			}, ortInfo);
+			if (result.success && result.opferweg) {
+				aktualisiereGottheit({ ...gottheit, opferweg: result.opferweg });
+			}
+		} catch (error) {
+			console.error('Fehler bei Gottheit-Opferweg-Generierung:', error);
+		} finally {
+			isGeneratingGottheitOpferweg = null;
+		}
+	}
+
+	function scrollToGottheit(id: string) {
+		const element = document.getElementById(`gottheit-${id}`);
+		if (element) {
+			element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+			element.classList.add('highlight');
+			setTimeout(() => element.classList.remove('highlight'), 1500);
+		}
+	}
+
 	function aktualisiereOrtName(event: Event) {
 		if (!generierterOrt) return;
 		const target = event.target as HTMLElement;
@@ -413,6 +879,93 @@
 		if (event.key === 'Enter') {
 			event.preventDefault();
 			(event.target as HTMLElement).blur();
+		}
+	}
+
+	async function generiereOrtDetails() {
+		if (!generierterOrt || isGeneratingDetails) return;
+
+		isGeneratingDetails = true;
+		detailsError = null;
+
+		try {
+			const ortInput = {
+				name: generierterOrt.name,
+				naturelle: generierterOrt.naturelle.map(n => ({
+					name: n.name,
+					beschreibung: n.beschreibung,
+					metaphorisch: n.metaphorisch
+				})),
+				bekannte: generierterOrt.bekannte.map(b => ({
+					name: b.name,
+					tier: b.tier,
+					berufe: b.berufe
+				})),
+				ortBeschreibung: generierterOrt.ortBeschreibung,
+				region: getRegionInfoForImage(),
+				erlaubeMagisch,
+				erlaubeTrauma
+			};
+
+			const result = await generateOrtDetails(ortInput);
+
+			generierterOrt = {
+				...generierterOrt,
+				details: {
+					geruechte: result.geruechte,
+					aktivitaeten: result.aktivitaeten,
+					entdeckungen: result.entdeckungen
+				}
+			};
+			syncAktuellenOrt();
+		} catch (error) {
+			detailsError = error instanceof Error ? error.message : 'Unbekannter Fehler';
+		} finally {
+			isGeneratingDetails = false;
+		}
+	}
+
+	async function generiereOrtGeschichte() {
+		if (!generierterOrt || isGeneratingGeschichte) return;
+
+		// Geschichte benötigt Details - falls nicht vorhanden, erst generieren
+		if (!generierterOrt.details) {
+			geschichteError = 'Bitte generiere zuerst die Details für diesen Ort.';
+			return;
+		}
+
+		isGeneratingGeschichte = true;
+		geschichteError = null;
+
+		try {
+			const ortInput = {
+				name: generierterOrt.name,
+				naturelle: generierterOrt.naturelle.map(n => ({
+					name: n.name,
+					beschreibung: n.beschreibung,
+					metaphorisch: n.metaphorisch
+				})),
+				bekannte: generierterOrt.bekannte.map(b => ({
+					name: b.name,
+					tier: b.tier,
+					berufe: b.berufe
+				})),
+				region: getRegionInfoForImage(),
+				details: generierterOrt.details
+			};
+
+			const events = await generateOrtGeschichte(ortInput);
+
+			generierterOrt = {
+				...generierterOrt,
+				geschichte: events
+			};
+			geschichteExpanded = true;
+			syncAktuellenOrt();
+		} catch (error) {
+			geschichteError = error instanceof Error ? error.message : 'Unbekannter Fehler';
+		} finally {
+			isGeneratingGeschichte = false;
 		}
 	}
 
@@ -480,6 +1033,7 @@
 			name: ortsname,
 			hauptNaturell,
 			bekannte: initialeBekannte,
+			gottheiten: [], // Leere Gottheiten-Liste beim Erstellen
 			naturelle: naturelleMitMetaphorisch,
 			erstelltAm: new Date().toISOString()
 		};
@@ -507,6 +1061,71 @@
 			element.scrollIntoView({ behavior: 'smooth', block: 'start' });
 			element.classList.add('highlight');
 			setTimeout(() => element.classList.remove('highlight'), 1500);
+		}
+	}
+
+	function scrollToBekannter(index: number) {
+		const element = document.getElementById(`bekannter-${index}`);
+		if (element) {
+			element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+			element.classList.add('highlight');
+			setTimeout(() => element.classList.remove('highlight'), 1500);
+		}
+	}
+
+	// Highlight Bekannte and Gottheiten names in text and make them clickable
+	function highlightBekannteInText(text: string): { html: string; hasMatches: boolean } {
+		const hasBekannte = generierterOrt?.bekannte.length;
+		const hasGottheiten = generierterOrt?.gottheiten?.length;
+
+		if (!hasBekannte && !hasGottheiten) return { html: text, hasMatches: false };
+
+		let result = text;
+		let hasMatches = false;
+
+		// First highlight Gottheiten (with golden/mystical style)
+		if (hasGottheiten) {
+			const sortedGottheiten = [...(generierterOrt!.gottheiten || [])]
+				.map(g => ({ name: g.name, id: g.id }))
+				.sort((a, b) => b.name.length - a.name.length);
+
+			for (const { name, id } of sortedGottheiten) {
+				const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				const regex = new RegExp(`\\b${escapedName}\\b`, 'gi');
+				if (regex.test(result)) {
+					hasMatches = true;
+					result = result.replace(regex, `<button class="gottheit-link" data-id="${id}">${name}</button>`);
+				}
+			}
+		}
+
+		// Then highlight Bekannte
+		if (hasBekannte) {
+			const sortedBekannte = [...generierterOrt!.bekannte]
+				.map((b, i) => ({ name: b.name, index: i }))
+				.sort((a, b) => b.name.length - a.name.length);
+
+			for (const { name, index } of sortedBekannte) {
+				const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				const regex = new RegExp(`\\b${escapedName}\\b`, 'gi');
+				if (regex.test(result)) {
+					hasMatches = true;
+					result = result.replace(regex, `<button class="bekannte-link" data-index="${index}">${name}</button>`);
+				}
+			}
+		}
+
+		return { html: result, hasMatches };
+	}
+
+	function handleDetailsClick(event: MouseEvent) {
+		const target = event.target as HTMLElement;
+		if (target.classList.contains('bekannte-link')) {
+			const index = parseInt(target.dataset.index || '0', 10);
+			scrollToBekannter(index);
+		} else if (target.classList.contains('gottheit-link')) {
+			const id = target.dataset.id || '';
+			scrollToGottheit(id);
 		}
 	}
 
@@ -747,6 +1366,78 @@
 				</div>
 			</div>
 
+			<!-- Orts-Beschreibung (unter dem Bild) -->
+			<div class="ort-beschreibung-section">
+				{#if generierterOrt.ortBeschreibung}
+					<div class="ort-beschreibung-display">
+						<p class="ort-beschreibung-text">{generierterOrt.ortBeschreibung}</p>
+						<div class="ort-beschreibung-actions">
+							<button
+								class="ort-beschreibung-edit-btn"
+								onclick={() => beschreibungExpanded = !beschreibungExpanded}
+								title="Bearbeiten"
+							>
+								✏️
+							</button>
+							<button
+								class="ort-beschreibung-regenerate-btn"
+								onclick={generiereOrtBeschreibung}
+								disabled={isGeneratingBeschreibung}
+								title="Neu generieren"
+							>
+								{isGeneratingBeschreibung ? '⏳' : '🔄'}
+							</button>
+						</div>
+					</div>
+					{#if beschreibungExpanded}
+						<textarea
+							class="ort-beschreibung-textarea"
+							value={generierterOrt.ortBeschreibung}
+							oninput={updateOrtBeschreibung}
+							rows="3"
+						></textarea>
+					{/if}
+				{:else if hasApiKey()}
+					<!-- Anmerkungen für die Beschreibung (optional) -->
+					<div class="beschreibungs-anmerkungen-section">
+						<button class="beschreibungs-anmerkungen-header" onclick={toggleBeschreibungsAnmerkungen}>
+							<span class="beschreibungs-anmerkungen-title">Anmerkungen zur Beschreibung (optional)</span>
+							<span class="beschreibungs-anmerkungen-toggle">{beschreibungsAnmerkungenExpanded ? '▼' : '▶'}</span>
+						</button>
+						{#if beschreibungsAnmerkungenExpanded}
+							<textarea
+								class="beschreibungs-anmerkungen-textarea"
+								placeholder="Was soll in der Beschreibung vorkommen? Z.B. 'Ein alter Brunnen steht in der Mitte' oder 'Hier leben viele Frösche'..."
+								value={generierterOrt.beschreibungsAnmerkungen || ''}
+								oninput={updateBeschreibungsAnmerkungen}
+								rows="3"
+							></textarea>
+							<p class="beschreibungs-anmerkungen-hint">Diese Details werden in die generierte Beschreibung eingearbeitet und ausgeschmückt.</p>
+						{/if}
+					</div>
+
+					<button
+						class="ort-beschreibung-generate-btn"
+						onclick={generiereOrtBeschreibung}
+						disabled={isGeneratingBeschreibung}
+					>
+						{#if isGeneratingBeschreibung}
+							<span class="ort-placeholder-spinner"></span>
+							<span>Beschreibung & Name werden generiert...</span>
+						{:else}
+							<span>✨ Ort interpretieren</span>
+						{/if}
+					</button>
+				{:else}
+					<p class="ort-beschreibung-hint">
+						<a href="/einstellungen">API Key einrichten</a> um eine Interpretation zu generieren.
+					</p>
+				{/if}
+				{#if beschreibungError}
+					<p class="ort-beschreibung-error">{beschreibungError}</p>
+				{/if}
+			</div>
+
 			<!-- Naturelle des Ortes -->
 			<div class="result-naturelle">
 				{#each generierterOrt.naturelle as nat}
@@ -808,12 +1499,12 @@
 					<p class="bekannte-hint">Klicke auf einen Namen um ihn zu bearbeiten</p>
 					<div class="bekannte-list">
 						{#each generierterOrt.bekannte as bekannter, index}
-							<div class="bekannte-item">
+							<div class="bekannte-item" id="bekannter-{index}">
 								<BekannterCard
 									{bekannter}
 									editable={true}
 									onUpdate={(updated) => aktualisiereBekannten(index, updated)}
-									ortContext={generierterOrt ? { name: generierterOrt.name, naturelleNames: generierterOrt.naturelle.map(n => n.name) } : undefined}
+									ortContext={generierterOrt ? { name: generierterOrt.name, naturelleNames: generierterOrt.naturelle.map(n => n.name), szenenBeschreibung: generierterOrt.szenenBeschreibung } : undefined}
 									regionContext={getRegionInfoForImage()}
 								/>
 								<button
@@ -826,6 +1517,317 @@
 					</div>
 				{:else}
 					<p class="keine-bekannte">Keine Bekannten an diesem Ort. Klicke +, um welche hinzuzufügen.</p>
+				{/if}
+			</div>
+
+			<!-- Lokale Gottheiten des Ortes -->
+			<div class="result-gottheiten">
+				<div class="gottheiten-header">
+					<h3>Lokale Gottheiten</h3>
+					<div class="gottheiten-controls">
+						<button
+							class="gottheiten-ctrl-btn"
+							onclick={() => {
+								const gottheiten = generierterOrt?.gottheiten || [];
+								if (gottheiten.length > 0) {
+									entferneGottheit(gottheiten[gottheiten.length - 1].id);
+								}
+							}}
+							disabled={!generierterOrt?.gottheiten?.length}
+							title="Letzte Gottheit entfernen"
+						>−</button>
+						<span class="gottheiten-count">{generierterOrt?.gottheiten?.length || 0}</span>
+						<button
+							class="gottheiten-ctrl-btn"
+							onclick={fuegeGottheitHinzu}
+							title="Gottheit hinzufügen"
+						>+</button>
+					</div>
+				</div>
+
+				{#if generierterOrt?.gottheiten?.length}
+					<p class="gottheiten-hint">Vergessene Götter und kleine Geister, die an diesem Ort weilen.</p>
+					<div class="gottheiten-list">
+						{#each generierterOrt.gottheiten as gottheit}
+							<div class="gottheit-item" id="gottheit-{gottheit.id}">
+								<GottheitCard
+									{gottheit}
+									compact={false}
+									editable={true}
+									onUpdate={aktualisiereGottheit}
+									onRemove={() => entferneGottheit(gottheit.id)}
+									onGenerateBild={() => generiereGottheitBildForOrt(gottheit)}
+									onGenerateVorgeschichte={() => generiereGottheitVorgeschichteForOrt(gottheit)}
+									onGenerateFähigkeiten={() => generiereGottheitFähigkeitenForOrt(gottheit)}
+									onGenerateOpferweg={() => generiereGottheitOpferwegForOrt(gottheit)}
+									isGeneratingBild={isGeneratingGottheitBild === gottheit.id}
+									isGeneratingVorgeschichte={isGeneratingGottheitVorgeschichte === gottheit.id}
+									isGeneratingFähigkeiten={isGeneratingGottheitFähigkeiten === gottheit.id}
+									isGeneratingOpferweg={isGeneratingGottheitOpferweg === gottheit.id}
+								/>
+							</div>
+						{/each}
+					</div>
+				{:else}
+					<p class="keine-gottheiten">Keine lokalen Gottheiten. Klicke +, um eine zu erschaffen. (Optional)</p>
+				{/if}
+			</div>
+
+			<!-- Spielleiter-Chat Section -->
+			<div class="spielleiter-chat-section">
+				<button class="spielleiter-chat-header" onclick={toggleSpielleiterChat}>
+					<span class="spielleiter-chat-title">
+						🎭 Spielleiter fragen
+						{#if generierterOrt?.spielleiterChat?.length}
+							<span class="chat-count">({generierterOrt.spielleiterChat.length})</span>
+						{/if}
+					</span>
+					<span class="spielleiter-chat-toggle">{spielleiterChatExpanded ? '▼' : '▶'}</span>
+				</button>
+
+				{#if spielleiterChatExpanded}
+					<div class="spielleiter-chat-content">
+						<!-- Gespeicherte Fakten anzeigen -->
+						{#if generierterOrt?.spielleiterFakten}
+							<div class="spielleiter-fakten-box">
+								<button class="fakten-toggle" onclick={() => showFaktenModal = true}>
+									📜 Bekannte Fakten anzeigen
+								</button>
+							</div>
+						{/if}
+
+						<!-- Chat-Verlauf -->
+						<div class="spielleiter-chat-messages">
+							{#if !generierterOrt?.spielleiterChat?.length && !generierterOrt?.spielleiterFakten}
+								<p class="chat-empty-hint">
+									Frage den Spielleiter nach Geschichten, Geheimnissen oder Details zu diesem Ort.
+									Du kannst auch eigene Fakten einbringen!
+								</p>
+							{/if}
+
+							{#each generierterOrt?.spielleiterChat || [] as nachricht}
+								<div class="chat-message" class:nutzer={nachricht.rolle === 'nutzer'} class:spielleiter={nachricht.rolle === 'spielleiter'}>
+									<div class="chat-message-header">
+										<span class="chat-rolle">{nachricht.rolle === 'nutzer' ? 'Du' : 'Spielleiter'}</span>
+									</div>
+									<div class="chat-message-text">{nachricht.text}</div>
+
+									<!-- Vorgeschlagene Fakten -->
+									{#if nachricht.rolle === 'spielleiter' && nachricht.vorgeschlageneFakten?.length}
+										<div class="chat-fakten-vorschlaege">
+											<span class="fakten-label">Neue Fakten:</span>
+											{#each nachricht.vorgeschlageneFakten as fakt, faktIndex}
+												<div class="fakt-vorschlag" class:akzeptiert={istFaktAkzeptiert(nachricht, faktIndex)}>
+													<span class="fakt-text">{fakt}</span>
+													{#if !istFaktAkzeptiert(nachricht, faktIndex)}
+														<button
+															class="fakt-akzeptieren-btn"
+															onclick={() => akzeptiereFakt(nachricht.id, faktIndex)}
+															title="Fakt akzeptieren"
+														>✓</button>
+													{:else}
+														<span class="fakt-akzeptiert-mark">✓</span>
+													{/if}
+												</div>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/each}
+
+							{#if isSpielleiterGenerating}
+								<div class="chat-message spielleiter generating">
+									<div class="chat-message-header">
+										<span class="chat-rolle">Spielleiter</span>
+									</div>
+									<div class="chat-message-text">
+										<span class="typing-indicator">
+											<span></span><span></span><span></span>
+										</span>
+									</div>
+								</div>
+							{/if}
+						</div>
+
+						<!-- Eingabe -->
+						{#if hasApiKey()}
+							<div class="spielleiter-chat-input-area">
+								<textarea
+									class="spielleiter-chat-input"
+									placeholder="Frage stellen oder Fakten einbringen..."
+									bind:value={spielleiterInput}
+									onkeydown={handleSpielleiterKeydown}
+									disabled={isSpielleiterGenerating}
+									rows="2"
+								></textarea>
+								<button
+									class="spielleiter-send-btn"
+									onclick={sendeSpielleiterNachricht}
+									disabled={isSpielleiterGenerating || !spielleiterInput.trim()}
+									title="Nachricht senden"
+								>
+									{isSpielleiterGenerating ? '...' : '➤'}
+								</button>
+							</div>
+
+							<!-- Chat-Aktionen -->
+							{#if generierterOrt?.spielleiterChat?.length}
+								<div class="spielleiter-chat-actions">
+									<button
+										class="btn btn-sm btn-secondary"
+										onclick={fasseSpielleiterChatZusammenUndLeere}
+										disabled={isZusammenfassend}
+										title="Fasst alle Fakten zusammen und leert den Chat"
+									>
+										{isZusammenfassend ? 'Fasse zusammen...' : '📋 Zusammenfassen & leeren'}
+									</button>
+								</div>
+							{/if}
+						{:else}
+							<p class="spielleiter-no-api">
+								<a href="/einstellungen">API Key einrichten</a> um den Spielleiter zu nutzen.
+							</p>
+						{/if}
+
+						{#if spielleiterError}
+							<p class="spielleiter-error">{spielleiterError}</p>
+						{/if}
+					</div>
+				{/if}
+			</div>
+
+			<!-- Fakten-Modal -->
+			{#if showFaktenModal && generierterOrt?.spielleiterFakten}
+				<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+				<div class="fakten-modal-backdrop" onclick={() => showFaktenModal = false}>
+					<div class="fakten-modal" onclick={(e) => e.stopPropagation()}>
+						<div class="fakten-modal-header">
+							<h3>📜 Bekannte Fakten zu {generierterOrt.name}</h3>
+							<button class="fakten-modal-close" onclick={() => showFaktenModal = false}>×</button>
+						</div>
+						<div class="fakten-modal-content">
+							<pre class="fakten-text">{generierterOrt.spielleiterFakten}</pre>
+						</div>
+					</div>
+				</div>
+			{/if}
+
+			<!-- Ort Details Section -->
+			<div class="ort-details-section">
+				<div class="details-header">
+					<h3>Über diesen Ort</h3>
+					{#if hasApiKey()}
+						<button
+							class="btn btn-sm btn-secondary"
+							onclick={generiereOrtDetails}
+							disabled={isGeneratingDetails}
+						>
+							{#if isGeneratingDetails}
+								Generiere...
+							{:else if generierterOrt?.details}
+								Neu generieren
+							{:else}
+								Details generieren
+							{/if}
+						</button>
+					{/if}
+				</div>
+
+				{#if detailsError}
+					<p class="details-error">{detailsError}</p>
+				{/if}
+
+				{#if generierterOrt?.details}
+					<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+					<div class="details-content" onclick={handleDetailsClick}>
+						<div class="details-column">
+							<h4>Gerüchte</h4>
+							<ul class="details-list geruechte">
+								{#each generierterOrt.details.geruechte as geruecht}
+									<li>{@html highlightBekannteInText(geruecht).html}</li>
+								{/each}
+							</ul>
+						</div>
+						<div class="details-column">
+							<h4>Aktivitäten</h4>
+							<ul class="details-list aktivitaeten">
+								{#each generierterOrt.details.aktivitaeten as aktivitaet}
+									<li>{@html highlightBekannteInText(aktivitaet).html}</li>
+								{/each}
+							</ul>
+						</div>
+						<div class="details-column">
+							<h4>Entdeckungen</h4>
+							<ul class="details-list entdeckungen">
+								{#each generierterOrt.details.entdeckungen as entdeckung}
+									<li>{@html highlightBekannteInText(entdeckung).html}</li>
+								{/each}
+							</ul>
+						</div>
+					</div>
+				{:else if !hasApiKey()}
+					<p class="details-placeholder">
+						<a href="/einstellungen">API Key einrichten</a>, um Details zu generieren.
+					</p>
+				{:else}
+					<p class="details-placeholder">
+						Klicke auf "Details generieren", um Gerüchte, Aktivitäten und Entdeckungen für diesen Ort zu erstellen.
+					</p>
+				{/if}
+			</div>
+
+			<!-- Ort Geschichte Section -->
+			<div class="ort-geschichte-section">
+				<button class="geschichte-header" onclick={() => geschichteExpanded = !geschichteExpanded}>
+					<h3>Geschichte des Ortes</h3>
+					<span class="geschichte-toggle">{geschichteExpanded ? '▼' : '▶'}</span>
+				</button>
+
+				{#if geschichteExpanded}
+					<div class="geschichte-content">
+						{#if hasApiKey()}
+							<button
+								class="btn btn-sm btn-secondary geschichte-generate-btn"
+								onclick={generiereOrtGeschichte}
+								disabled={isGeneratingGeschichte}
+							>
+								{#if isGeneratingGeschichte}
+									Generiere...
+								{:else if generierterOrt?.geschichte?.length}
+									Neu generieren
+								{:else}
+									Geschichte generieren
+								{/if}
+							</button>
+						{/if}
+
+						{#if geschichteError}
+							<p class="geschichte-error">{geschichteError}</p>
+						{/if}
+
+						{#if generierterOrt?.geschichte?.length}
+							<div class="geschichte-timeline">
+								{#each generierterOrt.geschichte as event}
+									<!-- svelte-ignore a11y_no_static_element_interactions -->
+									<!-- svelte-ignore a11y_click_events_have_key_events -->
+									<div class="geschichte-event" onclick={handleDetailsClick}>
+										{#if event.jahr}
+											<span class="event-jahr">{event.jahr}</span>
+										{/if}
+										<p class="event-text">{@html highlightBekannteInText(event.event).html}</p>
+									</div>
+								{/each}
+							</div>
+						{:else if !hasApiKey()}
+							<p class="geschichte-placeholder">
+								<a href="/einstellungen">API Key einrichten</a>, um die Geschichte zu generieren.
+							</p>
+						{:else}
+							<p class="geschichte-placeholder">
+								Generiere zuerst Details, dann klicke auf "Geschichte generieren" für eine Zeitleiste der Ereignisse.
+							</p>
+						{/if}
+					</div>
 				{/if}
 			</div>
 
@@ -1934,6 +2936,141 @@
 		font-size: 0.75rem;
 	}
 
+	/* Orts-Beschreibung Section */
+	.ort-beschreibung-section {
+		margin: var(--space-md) 0;
+		position: relative;
+	}
+
+	.ort-beschreibung-display {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--space-sm);
+		padding: var(--space-md);
+		background: linear-gradient(135deg, var(--color-cream) 0%, var(--color-parchment) 100%);
+		border-left: 4px solid var(--color-leaf);
+		border-radius: 0 var(--radius-md) var(--radius-md) 0;
+	}
+
+	.ort-beschreibung-text {
+		flex: 1;
+		margin: 0;
+		font-size: 1rem;
+		line-height: 1.6;
+		color: var(--color-earth-dark);
+		font-style: italic;
+	}
+
+	.ort-beschreibung-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		opacity: 0.5;
+		transition: opacity 0.2s;
+	}
+
+	.ort-beschreibung-display:hover .ort-beschreibung-actions {
+		opacity: 1;
+	}
+
+	.ort-beschreibung-edit-btn,
+	.ort-beschreibung-regenerate-btn {
+		width: 28px;
+		height: 28px;
+		padding: 0;
+		border: none;
+		background: var(--color-earth-light);
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+		font-size: 0.85rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: all 0.2s;
+	}
+
+	.ort-beschreibung-edit-btn:hover,
+	.ort-beschreibung-regenerate-btn:hover:not(:disabled) {
+		background: var(--color-leaf);
+		color: white;
+	}
+
+	.ort-beschreibung-regenerate-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.ort-beschreibung-textarea {
+		width: 100%;
+		margin-top: var(--space-sm);
+		padding: var(--space-sm);
+		border: 2px solid var(--color-leaf-light);
+		border-radius: var(--radius-md);
+		background: white;
+		font-family: inherit;
+		font-size: 0.95rem;
+		resize: vertical;
+		line-height: 1.5;
+	}
+
+	.ort-beschreibung-textarea:focus {
+		outline: none;
+		border-color: var(--color-leaf);
+	}
+
+	.ort-beschreibung-generate-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-sm);
+		width: 100%;
+		padding: var(--space-md) var(--space-lg);
+		background: linear-gradient(135deg, var(--color-leaf-light) 0%, var(--color-leaf) 100%);
+		border: none;
+		border-radius: var(--radius-md);
+		cursor: pointer;
+		font-size: 1rem;
+		font-weight: 600;
+		color: white;
+		transition: all 0.2s;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+	}
+
+	.ort-beschreibung-generate-btn:hover:not(:disabled) {
+		transform: translateY(-2px);
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+	}
+
+	.ort-beschreibung-generate-btn:disabled {
+		opacity: 0.7;
+		cursor: not-allowed;
+		transform: none;
+	}
+
+	.ort-beschreibung-hint {
+		padding: var(--space-md);
+		font-size: 0.9rem;
+		color: var(--color-earth);
+		font-style: italic;
+		text-align: center;
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
+	}
+
+	.ort-beschreibung-hint a {
+		color: var(--color-leaf);
+		text-decoration: underline;
+	}
+
+	.ort-beschreibung-error {
+		margin-top: var(--space-sm);
+		padding: var(--space-sm);
+		color: var(--color-berry);
+		font-size: 0.85rem;
+		background: rgba(220, 53, 69, 0.1);
+		border-radius: var(--radius-sm);
+	}
+
 	/* Anmerkungen Section */
 	.anmerkungen-section {
 		flex: 1;
@@ -2020,6 +3157,70 @@
 		font-size: 0.85rem;
 		color: var(--color-earth-dark);
 		line-height: 1.5;
+		font-style: italic;
+	}
+
+	/* Beschreibungs-Anmerkungen Section */
+	.beschreibungs-anmerkungen-section {
+		margin-bottom: var(--space-md);
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
+		border: 2px solid var(--color-leaf-light, var(--color-earth-light));
+		overflow: hidden;
+	}
+
+	.beschreibungs-anmerkungen-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		width: 100%;
+		padding: var(--space-sm) var(--space-md);
+		background: rgba(107, 142, 78, 0.2);
+		border: none;
+		cursor: pointer;
+		font-family: inherit;
+		font-size: 0.9rem;
+		font-weight: 600;
+		color: var(--color-leaf-dark);
+	}
+
+	.beschreibungs-anmerkungen-header:hover {
+		background: rgba(107, 142, 78, 0.35);
+	}
+
+	.beschreibungs-anmerkungen-title {
+		font-size: 0.85rem;
+	}
+
+	.beschreibungs-anmerkungen-toggle {
+		font-size: 0.8rem;
+	}
+
+	.beschreibungs-anmerkungen-textarea {
+		width: 100%;
+		min-height: 70px;
+		padding: var(--space-sm);
+		border: none;
+		background: transparent;
+		font-family: inherit;
+		font-size: 0.9rem;
+		resize: vertical;
+	}
+
+	.beschreibungs-anmerkungen-textarea:focus {
+		outline: none;
+	}
+
+	.beschreibungs-anmerkungen-textarea::placeholder {
+		color: var(--color-earth);
+		font-style: italic;
+	}
+
+	.beschreibungs-anmerkungen-hint {
+		margin: 0;
+		padding: var(--space-xs) var(--space-sm) var(--space-sm);
+		font-size: 0.8rem;
+		color: var(--color-earth);
 		font-style: italic;
 	}
 
@@ -2152,6 +3353,714 @@
 		.besonderheit-label {
 			min-width: auto;
 		}
+	}
+
+	/* Ort Details Section */
+	.ort-details-section {
+		margin-top: var(--space-lg);
+		padding: var(--space-lg);
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
+		border: 2px solid var(--color-earth-light);
+	}
+
+	.details-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: var(--space-md);
+	}
+
+	.details-header h3 {
+		margin: 0;
+		font-family: var(--font-display);
+		color: var(--color-earth-dark);
+	}
+
+	.details-content {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: var(--space-lg);
+	}
+
+	@media (max-width: 900px) {
+		.details-content {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	.details-column h4 {
+		margin: 0 0 var(--space-sm) 0;
+		font-size: 0.95rem;
+		color: var(--color-leaf-dark);
+		border-bottom: 2px solid var(--color-earth-light);
+		padding-bottom: var(--space-xs);
+	}
+
+	.details-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.details-list li {
+		padding: var(--space-sm);
+		margin-bottom: var(--space-xs);
+		background: var(--color-parchment);
+		border-radius: var(--radius-sm);
+		font-size: 0.9rem;
+		line-height: 1.4;
+		border-left: 3px solid var(--color-earth-light);
+	}
+
+	.details-list.geruechte li {
+		border-left-color: #8e7cc3;
+	}
+
+	.details-list.aktivitaeten li {
+		border-left-color: #7cb342;
+	}
+
+	.details-list.entdeckungen li {
+		border-left-color: #c9a227;
+	}
+
+	.details-placeholder {
+		text-align: center;
+		color: var(--color-earth);
+		font-style: italic;
+		padding: var(--space-md);
+	}
+
+	.details-placeholder a {
+		color: var(--color-leaf-dark);
+	}
+
+	.details-error {
+		color: #c0392b;
+		font-size: 0.9rem;
+		text-align: center;
+		margin-bottom: var(--space-sm);
+	}
+
+	/* Ort Geschichte Section */
+	.ort-geschichte-section {
+		margin-top: var(--space-lg);
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
+		border: 2px solid var(--color-earth-light);
+		overflow: hidden;
+	}
+
+	.geschichte-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		width: 100%;
+		padding: var(--space-md) var(--space-lg);
+		background: linear-gradient(135deg, rgba(156, 124, 56, 0.15), var(--color-earth-light));
+		border: none;
+		cursor: pointer;
+		font-family: inherit;
+	}
+
+	.geschichte-header:hover {
+		background: linear-gradient(135deg, rgba(156, 124, 56, 0.25), var(--color-earth-light));
+	}
+
+	.geschichte-header h3 {
+		margin: 0;
+		font-family: var(--font-display);
+		color: var(--color-earth-dark);
+		font-size: 1rem;
+	}
+
+	.geschichte-toggle {
+		font-size: 0.9rem;
+		color: var(--color-earth);
+	}
+
+	.geschichte-content {
+		padding: var(--space-lg);
+	}
+
+	.geschichte-generate-btn {
+		margin-bottom: var(--space-md);
+	}
+
+	.geschichte-error {
+		color: #c0392b;
+		font-size: 0.9rem;
+		margin-bottom: var(--space-sm);
+	}
+
+	.geschichte-placeholder {
+		text-align: center;
+		color: var(--color-earth);
+		font-style: italic;
+	}
+
+	.geschichte-placeholder a {
+		color: var(--color-leaf-dark);
+	}
+
+	.geschichte-timeline {
+		position: relative;
+		padding-left: var(--space-lg);
+		border-left: 3px solid var(--color-earth-light);
+	}
+
+	.geschichte-event {
+		position: relative;
+		padding-bottom: var(--space-md);
+	}
+
+	.geschichte-event:last-child {
+		padding-bottom: 0;
+	}
+
+	.geschichte-event::before {
+		content: '';
+		position: absolute;
+		left: calc(-1 * var(--space-lg) - 6px);
+		top: 4px;
+		width: 12px;
+		height: 12px;
+		background: var(--color-earth);
+		border-radius: 50%;
+		border: 2px solid var(--color-cream);
+	}
+
+	.event-jahr {
+		display: inline-block;
+		background: linear-gradient(135deg, #9c7c38, #c9a227);
+		color: white;
+		padding: 2px 8px;
+		border-radius: var(--radius-sm);
+		font-size: 0.8rem;
+		font-weight: 600;
+		margin-bottom: var(--space-xs);
+	}
+
+	.event-text {
+		margin: 0;
+		font-size: 0.9rem;
+		line-height: 1.5;
+		color: var(--color-earth-dark);
+	}
+
+	/* Bekannte Links in Details */
+	:global(.bekannte-link) {
+		background: linear-gradient(135deg, rgba(107, 142, 78, 0.2), rgba(107, 142, 78, 0.3));
+		border: 1px solid var(--color-leaf);
+		border-radius: var(--radius-sm);
+		padding: 1px 6px;
+		font-family: inherit;
+		font-size: inherit;
+		font-weight: 600;
+		color: var(--color-leaf-dark);
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+
+	:global(.bekannte-link:hover) {
+		background: linear-gradient(135deg, rgba(107, 142, 78, 0.4), rgba(107, 142, 78, 0.5));
+		transform: translateY(-1px);
+		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+	}
+
+	:global(.bekannte-link:active) {
+		transform: translateY(0);
+	}
+
+	/* Highlight animation for bekannte-item */
+	.bekannte-item.highlight {
+		animation: bekannte-highlight-pulse 1.5s ease;
+	}
+
+	@keyframes bekannte-highlight-pulse {
+		0%, 100% { box-shadow: none; }
+		20%, 80% { box-shadow: 0 0 0 3px var(--color-leaf), 0 4px 16px rgba(107, 142, 78, 0.3); }
+	}
+
+	/* Gottheiten Section */
+	.result-gottheiten {
+		margin-top: var(--space-lg);
+		padding: var(--space-lg);
+		background: linear-gradient(135deg, rgba(201, 162, 39, 0.05), rgba(139, 105, 20, 0.08));
+		border-radius: var(--radius-lg);
+		border: 2px solid rgba(201, 162, 39, 0.3);
+	}
+
+	.gottheiten-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: var(--space-md);
+	}
+
+	.gottheiten-header h3 {
+		margin: 0;
+		color: #8b6914;
+		font-size: 1.1rem;
+	}
+
+	.gottheiten-controls {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xs);
+	}
+
+	.gottheiten-ctrl-btn {
+		width: 28px;
+		height: 28px;
+		border-radius: 50%;
+		border: 2px solid #c9a227;
+		background: linear-gradient(135deg, #fff9e6, #f5e6c8);
+		color: #8b6914;
+		font-size: 1rem;
+		font-weight: bold;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: all 0.2s;
+	}
+
+	.gottheiten-ctrl-btn:hover:not(:disabled) {
+		background: linear-gradient(135deg, #c9a227, #a07d1c);
+		color: white;
+		transform: scale(1.05);
+	}
+
+	.gottheiten-ctrl-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	.gottheiten-count {
+		min-width: 24px;
+		text-align: center;
+		font-weight: 600;
+		color: #8b6914;
+	}
+
+	.gottheiten-hint {
+		font-style: italic;
+		color: #8b6914;
+		font-size: 0.9rem;
+		margin-bottom: var(--space-md);
+	}
+
+	.gottheiten-list {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-md);
+	}
+
+	.gottheit-item {
+		transition: all 0.3s ease;
+		border-radius: var(--radius-md);
+	}
+
+	.keine-gottheiten {
+		text-align: center;
+		color: #8b6914;
+		font-style: italic;
+		padding: var(--space-md);
+	}
+
+	/* Gottheit Links in Text (golden/mystical style) */
+	:global(.gottheit-link) {
+		background: linear-gradient(135deg, rgba(201, 162, 39, 0.2), rgba(201, 162, 39, 0.35));
+		border: 1px solid #c9a227;
+		border-radius: var(--radius-sm);
+		padding: 1px 6px;
+		font-family: inherit;
+		font-size: inherit;
+		font-weight: 600;
+		color: #8b6914;
+		cursor: pointer;
+		transition: all 0.2s ease;
+		text-shadow: 0 0 2px rgba(201, 162, 39, 0.3);
+	}
+
+	:global(.gottheit-link:hover) {
+		background: linear-gradient(135deg, rgba(201, 162, 39, 0.4), rgba(201, 162, 39, 0.55));
+		transform: translateY(-1px);
+		box-shadow: 0 2px 8px rgba(201, 162, 39, 0.3), 0 0 4px rgba(201, 162, 39, 0.2);
+	}
+
+	:global(.gottheit-link:active) {
+		transform: translateY(0);
+	}
+
+	/* Highlight animation for gottheit-item */
+	.gottheit-item.highlight {
+		animation: gottheit-highlight-pulse 1.5s ease;
+	}
+
+	@keyframes gottheit-highlight-pulse {
+		0%, 100% { box-shadow: none; }
+		20%, 80% { box-shadow: 0 0 0 3px #c9a227, 0 4px 16px rgba(201, 162, 39, 0.4); }
+	}
+
+	/* ==========================================
+	   Spielleiter-Chat Styles
+	   ========================================== */
+
+	.spielleiter-chat-section {
+		margin-top: var(--space-xl);
+		background: var(--color-parchment);
+		border-radius: var(--radius-lg);
+		border: 2px solid var(--color-leaf);
+		overflow: hidden;
+	}
+
+	.spielleiter-chat-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		width: 100%;
+		padding: var(--space-md) var(--space-lg);
+		background: linear-gradient(135deg, rgba(107, 142, 78, 0.2), rgba(107, 142, 78, 0.35));
+		border: none;
+		cursor: pointer;
+		font-family: var(--font-display);
+		font-size: 1.1rem;
+		font-weight: 600;
+		color: var(--color-leaf-dark);
+		transition: background 0.2s;
+	}
+
+	.spielleiter-chat-header:hover {
+		background: linear-gradient(135deg, rgba(107, 142, 78, 0.3), rgba(107, 142, 78, 0.45));
+	}
+
+	.spielleiter-chat-title {
+		display: flex;
+		align-items: center;
+		gap: var(--space-sm);
+	}
+
+	.chat-count {
+		font-size: 0.85rem;
+		font-weight: normal;
+		color: var(--color-earth);
+	}
+
+	.spielleiter-chat-toggle {
+		font-size: 0.9rem;
+	}
+
+	.spielleiter-chat-content {
+		padding: var(--space-md);
+	}
+
+	.spielleiter-fakten-box {
+		margin-bottom: var(--space-md);
+		text-align: center;
+	}
+
+	.fakten-toggle {
+		padding: var(--space-sm) var(--space-md);
+		background: rgba(201, 162, 39, 0.15);
+		border: 1px solid #c9a227;
+		border-radius: var(--radius-md);
+		color: #8b6914;
+		font-weight: 600;
+		cursor: pointer;
+		transition: all 0.2s;
+	}
+
+	.fakten-toggle:hover {
+		background: rgba(201, 162, 39, 0.3);
+	}
+
+	.spielleiter-chat-messages {
+		max-height: 400px;
+		overflow-y: auto;
+		margin-bottom: var(--space-md);
+		padding: var(--space-sm);
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
+		min-height: 100px;
+	}
+
+	.chat-empty-hint {
+		text-align: center;
+		color: var(--color-earth);
+		font-style: italic;
+		padding: var(--space-lg);
+	}
+
+	.chat-message {
+		margin-bottom: var(--space-md);
+		padding: var(--space-sm) var(--space-md);
+		border-radius: var(--radius-md);
+		animation: fadeIn 0.3s ease;
+	}
+
+	.chat-message.nutzer {
+		background: rgba(107, 142, 78, 0.15);
+		margin-left: var(--space-lg);
+		border-left: 3px solid var(--color-leaf);
+	}
+
+	.chat-message.spielleiter {
+		background: rgba(139, 119, 101, 0.1);
+		margin-right: var(--space-lg);
+		border-left: 3px solid var(--color-earth);
+	}
+
+	.chat-message-header {
+		margin-bottom: var(--space-xs);
+	}
+
+	.chat-rolle {
+		font-weight: 600;
+		font-size: 0.85rem;
+		color: var(--color-earth-dark);
+	}
+
+	.chat-message.nutzer .chat-rolle {
+		color: var(--color-leaf-dark);
+	}
+
+	.chat-message-text {
+		font-size: 0.95rem;
+		line-height: 1.5;
+		color: var(--color-bark);
+	}
+
+	/* Typing Indicator */
+	.typing-indicator {
+		display: inline-flex;
+		gap: 4px;
+		padding: var(--space-xs);
+	}
+
+	.typing-indicator span {
+		width: 8px;
+		height: 8px;
+		background: var(--color-earth);
+		border-radius: 50%;
+		animation: typing-bounce 1.4s infinite ease-in-out both;
+	}
+
+	.typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
+	.typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+
+	@keyframes typing-bounce {
+		0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+		40% { transform: scale(1); opacity: 1; }
+	}
+
+	/* Fakten Vorschläge */
+	.chat-fakten-vorschlaege {
+		margin-top: var(--space-sm);
+		padding-top: var(--space-sm);
+		border-top: 1px dashed var(--color-earth-light);
+	}
+
+	.fakten-label {
+		display: block;
+		font-size: 0.8rem;
+		color: var(--color-earth);
+		margin-bottom: var(--space-xs);
+		font-weight: 600;
+	}
+
+	.fakt-vorschlag {
+		display: flex;
+		align-items: center;
+		gap: var(--space-sm);
+		padding: var(--space-xs) var(--space-sm);
+		background: rgba(201, 162, 39, 0.1);
+		border-radius: var(--radius-sm);
+		margin-bottom: var(--space-xs);
+		font-size: 0.9rem;
+	}
+
+	.fakt-vorschlag.akzeptiert {
+		background: rgba(107, 142, 78, 0.2);
+		border: 1px solid var(--color-leaf);
+	}
+
+	.fakt-text {
+		flex: 1;
+	}
+
+	.fakt-akzeptieren-btn {
+		width: 24px;
+		height: 24px;
+		padding: 0;
+		border: none;
+		background: var(--color-leaf);
+		color: white;
+		border-radius: 50%;
+		cursor: pointer;
+		font-size: 0.85rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: all 0.2s;
+	}
+
+	.fakt-akzeptieren-btn:hover {
+		background: var(--color-leaf-dark);
+		transform: scale(1.1);
+	}
+
+	.fakt-akzeptiert-mark {
+		color: var(--color-leaf-dark);
+		font-weight: bold;
+	}
+
+	/* Eingabe */
+	.spielleiter-chat-input-area {
+		display: flex;
+		gap: var(--space-sm);
+		align-items: flex-end;
+	}
+
+	.spielleiter-chat-input {
+		flex: 1;
+		padding: var(--space-sm);
+		border: 2px solid var(--color-earth-light);
+		border-radius: var(--radius-md);
+		font-family: inherit;
+		font-size: 0.95rem;
+		resize: none;
+		background: white;
+	}
+
+	.spielleiter-chat-input:focus {
+		outline: none;
+		border-color: var(--color-leaf);
+	}
+
+	.spielleiter-chat-input:disabled {
+		background: var(--color-cream);
+	}
+
+	.spielleiter-send-btn {
+		width: 44px;
+		height: 44px;
+		padding: 0;
+		border: none;
+		background: var(--color-leaf);
+		color: white;
+		border-radius: var(--radius-md);
+		cursor: pointer;
+		font-size: 1.2rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: all 0.2s;
+	}
+
+	.spielleiter-send-btn:hover:not(:disabled) {
+		background: var(--color-leaf-dark);
+	}
+
+	.spielleiter-send-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.spielleiter-chat-actions {
+		margin-top: var(--space-md);
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.spielleiter-no-api {
+		text-align: center;
+		color: var(--color-earth);
+		font-style: italic;
+	}
+
+	.spielleiter-no-api a {
+		color: var(--color-leaf-dark);
+		font-weight: 600;
+	}
+
+	.spielleiter-error {
+		margin-top: var(--space-sm);
+		color: #c0392b;
+		font-size: 0.9rem;
+		text-align: center;
+	}
+
+	/* Fakten Modal */
+	.fakten-modal-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.6);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+		padding: var(--space-md);
+	}
+
+	.fakten-modal {
+		background: var(--color-parchment);
+		border-radius: var(--radius-lg);
+		max-width: 600px;
+		width: 100%;
+		max-height: 80vh;
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+	}
+
+	.fakten-modal-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: var(--space-md) var(--space-lg);
+		background: linear-gradient(135deg, rgba(201, 162, 39, 0.2), rgba(201, 162, 39, 0.35));
+		border-bottom: 1px solid #c9a227;
+	}
+
+	.fakten-modal-header h3 {
+		margin: 0;
+		color: #8b6914;
+		font-size: 1.1rem;
+	}
+
+	.fakten-modal-close {
+		width: 32px;
+		height: 32px;
+		padding: 0;
+		border: none;
+		background: transparent;
+		color: #8b6914;
+		font-size: 1.5rem;
+		cursor: pointer;
+		border-radius: 50%;
+		transition: all 0.2s;
+	}
+
+	.fakten-modal-close:hover {
+		background: rgba(201, 162, 39, 0.3);
+	}
+
+	.fakten-modal-content {
+		padding: var(--space-lg);
+		overflow-y: auto;
+	}
+
+	.fakten-text {
+		margin: 0;
+		font-family: inherit;
+		font-size: 0.95rem;
+		line-height: 1.6;
+		white-space: pre-wrap;
+		color: var(--color-bark);
 	}
 
 </style>

@@ -2,7 +2,7 @@
 	import type { GenerierterBekannter, VerbundenerBekannter, Muendel, Hummel } from '$lib/data/merkmale';
 	import { generiereHummel, generiereMuendel } from '$lib/data/merkmale';
 	import { charaktere, type VerbundeneBekannteConfig } from '$lib/data/charaktere';
-	import { hasApiKey, generateHummelImage, type OrtContext, type RegionInfo } from '$lib/services/geminiService';
+	import { hasApiKey, generateHummelImage, generateCharakterZitate, type OrtContext, type RegionInfo } from '$lib/services/geminiService';
 	import { kategorieToClass, germanSlugify } from '$lib/utils/slugify';
 	import ImageModal from './ImageModal.svelte';
 	import CharacterAvatar from './CharacterAvatar.svelte';
@@ -22,6 +22,11 @@
 	let { bekannter, compact = false, editable = false, onRemove, onUpdate, ortContext, regionContext }: Props = $props();
 
 	let showImageModal = $state(false);
+
+	// Zitat generation state
+	let isGeneratingZitat = $state(false);
+	let zitatError = $state<string | null>(null);
+	const MAX_ZITATE = 3;
 
 	// Get verbundene Bekannte config if this character has a charakterKlasse
 	let verbundeneConfig = $derived.by(() => {
@@ -224,6 +229,40 @@
 			regionContext
 		};
 	}
+
+	// Zitat functions
+	async function handleGenerateZitate() {
+		if (isGeneratingZitat || !onUpdate) return;
+
+		isGeneratingZitat = true;
+		zitatError = null;
+
+		try {
+			const result = await generateCharakterZitate(
+				bekannter.name,
+				bekannter.tier,
+				bekannter.geschlecht,
+				bekannter.berufe,
+				bekannter.merkmal.name,
+				bekannter.merkmal.beschreibung
+			);
+			if (result.success && result.zitate) {
+				onUpdate({ ...bekannter, zitate: result.zitate });
+			} else {
+				zitatError = result.error || 'Zitate konnten nicht generiert werden';
+			}
+		} catch (err) {
+			zitatError = err instanceof Error ? err.message : 'Unbekannter Fehler';
+		} finally {
+			isGeneratingZitat = false;
+		}
+	}
+
+	function handleDeleteZitat(index: number) {
+		if (!onUpdate) return;
+		const neueZitate = (bekannter.zitate || []).filter((_, i) => i !== index);
+		onUpdate({ ...bekannter, zitate: neueZitate });
+	}
 </script>
 
 {#if compact}
@@ -347,6 +386,53 @@
 						<li>{aktion}</li>
 					{/each}
 				</ul>
+			</div>
+
+			<!-- Zitate Section -->
+			<div class="zitat-section">
+				<h4>Zitate ({bekannter.zitate?.length || 0}/{MAX_ZITATE})</h4>
+				{#if bekannter.zitate && bekannter.zitate.length > 0}
+					<div class="zitate-liste">
+						{#each bekannter.zitate as zitatText, index}
+							<div class="zitat-item">
+								<blockquote class="zitat-text">"{zitatText}"</blockquote>
+								{#if onUpdate}
+									<button
+										class="zitat-delete-btn"
+										onclick={() => handleDeleteZitat(index)}
+										title="Zitat entfernen"
+									>×</button>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+
+				{#if hasApiKey() && onUpdate}
+					{#if !bekannter.zitate || bekannter.zitate.length === 0}
+						<button
+							class="btn btn-primary btn-sm"
+							onclick={handleGenerateZitate}
+							disabled={isGeneratingZitat}
+						>
+							{#if isGeneratingZitat}
+								<span class="zitat-spinner"></span>
+								Generiere 3 Zitate...
+							{:else}
+								Zitate generieren
+							{/if}
+						</button>
+						<p class="zitat-hint">Generiert 3 unterschiedliche Zitate aus verschiedenen Situationen</p>
+					{:else}
+						<p class="zitat-info">Lösche alle Zitate um neue zu generieren</p>
+					{/if}
+				{:else if !hasApiKey()}
+					<p class="zitat-no-api">Kein API Key - Zitate nicht verfügbar</p>
+				{/if}
+
+				{#if zitatError}
+					<p class="zitat-error">{zitatError}</p>
+				{/if}
 			</div>
 
 			{#if onUpdate && !hasApiKey()}
@@ -1176,5 +1262,107 @@
 		padding: var(--space-md);
 		background: var(--color-cream);
 		border-radius: var(--radius-md);
+	}
+
+	/* Zitat Section Styles */
+	.zitat-section {
+		margin-top: var(--space-lg);
+		padding: var(--space-md);
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
+		border-left: 4px solid var(--color-leaf);
+	}
+
+	.zitat-section h4 {
+		margin: 0 0 var(--space-sm);
+		color: var(--color-leaf-dark);
+	}
+
+	.zitate-liste {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-sm);
+		margin-bottom: var(--space-md);
+	}
+
+	.zitat-item {
+		position: relative;
+		padding-right: var(--space-lg);
+	}
+
+	.zitat-text {
+		margin: 0;
+		font-style: italic;
+		font-size: 1rem;
+		color: var(--color-earth-dark);
+		line-height: 1.5;
+	}
+
+	.zitat-delete-btn {
+		position: absolute;
+		top: 0;
+		right: 0;
+		width: 20px;
+		height: 20px;
+		border: none;
+		background: var(--color-earth-light);
+		color: var(--color-earth-dark);
+		border-radius: 50%;
+		font-size: 1rem;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		opacity: 0.6;
+		transition: all 0.2s;
+	}
+
+	.zitat-delete-btn:hover {
+		opacity: 1;
+		background: #dc3545;
+		color: white;
+	}
+
+	.zitat-hint {
+		font-size: 0.8rem;
+		color: var(--color-earth);
+		margin: var(--space-sm) 0 0 0;
+		font-style: italic;
+	}
+
+	.zitat-info {
+		font-size: 0.85rem;
+		color: var(--color-earth);
+		margin: 0;
+		font-style: italic;
+	}
+
+	.zitat-no-api {
+		font-size: 0.8rem;
+		color: var(--color-earth);
+		margin: 0;
+		font-style: italic;
+	}
+
+	.zitat-error {
+		color: #dc3545;
+		font-size: 0.85rem;
+		margin: var(--space-sm) 0 0 0;
+	}
+
+	.zitat-spinner {
+		display: inline-block;
+		width: 14px;
+		height: 14px;
+		border: 2px solid white;
+		border-top-color: transparent;
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+		margin-right: var(--space-xs);
+	}
+
+	.btn-sm {
+		font-size: 0.85rem;
+		padding: var(--space-xs) var(--space-sm);
 	}
 </style>

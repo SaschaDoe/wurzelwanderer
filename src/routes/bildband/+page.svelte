@@ -225,6 +225,7 @@
 			const istNachOrtswechsel = aktuelleSzene.nummer >= 6;
 			const kontext: SzenenKontext = {
 				charaktere: generationConfig.charaktere,
+				bekannte: aktuellerBildband.bekannte,
 				aktuelleRegion: istNachOrtswechsel
 					? aktuellerBildband.zweiterOrt?.region || aktuellerBildband.startRegion
 					: aktuellerBildband.startRegion,
@@ -233,7 +234,8 @@
 					: aktuellerBildband.startOrt,
 				zweiterOrt: aktuellerBildband.zweiterOrt,
 				bisherigeSzenen: aktuellerBildband.szenen.slice(0, currentSzeneIndex),
-				szenenDefinition: SZENEN_STRUKTUR[currentSzeneIndex]
+				szenenDefinition: SZENEN_STRUKTUR[currentSzeneIndex],
+				storyPlan: aktuellerBildband.storyPlan
 			};
 
 			const result = await generiereWeiteresBild(aktuelleSzene, kontext);

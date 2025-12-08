@@ -1,7 +1,22 @@
 <script lang="ts">
 	import '../app.css';
+	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
+	import { initApiKey } from '$lib/services/geminiService';
+	import { initOpenAIKey } from '$lib/services/openaiService';
 
 	let { children } = $props();
+
+	// Initialize API keys on app startup
+	onMount(async () => {
+		if (browser) {
+			await Promise.all([
+				initApiKey(),
+				initOpenAIKey()
+			]);
+			console.log('[App] API Keys initialisiert');
+		}
+	});
 </script>
 
 <svelte:head>
@@ -19,7 +34,9 @@
 				<li><a href="/spielanleitung">Spielanleitung</a></li>
 				<li><a href="/wurzelbuecher">Charaktere</a></li>
 				<li><a href="/naturelle">Naturelle</a></li>
+				<li><a href="/hexkarte">Hexkarte</a></li>
 				<li><a href="/bekannte">Bekannte</a></li>
+				<li><a href="/gottheiten">Gottheiten</a></li>
 				<li><a href="/bildband">Bildband</a></li>
 				<li><a href="/jahreskreis">Jahreskreis</a></li>
 			</ul>

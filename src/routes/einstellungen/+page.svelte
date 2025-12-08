@@ -1,12 +1,20 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getApiKey, setApiKey, clearApiKey, hasApiKey, listAvailableModels } from '$lib/services/geminiService';
+	import { getOpenAIKey, saveOpenAIKey, hasOpenAIKey, initOpenAIKey } from '$lib/services/openaiService';
+	import { removeStoredItem, STORAGE_KEYS } from '$lib/utils/storage';
 
+	// Gemini state
 	let apiKeyInput = $state('');
 	let apiKeyGespeichert = $state(false);
 	let showKey = $state(false);
 	let envKeyVorhanden = $state(false);
 	let modelsLaden = $state(false);
+
+	// OpenAI state
+	let openaiKeyInput = $state('');
+	let openaiKeyGespeichert = $state(false);
+	let showOpenAIKey = $state(false);
 
 	// Load on mount
 	onMount(async () => {
@@ -17,6 +25,14 @@
 		if (savedKey) {
 			apiKeyInput = savedKey;
 			apiKeyGespeichert = true;
+		}
+
+		// Load OpenAI key
+		await initOpenAIKey();
+		const savedOpenAIKey = await getOpenAIKey();
+		if (savedOpenAIKey) {
+			openaiKeyInput = savedOpenAIKey;
+			openaiKeyGespeichert = true;
 		}
 	});
 
@@ -33,9 +49,44 @@
 		apiKeyGespeichert = false;
 	}
 
+	async function speichereOpenAIKey() {
+		if (openaiKeyInput.trim()) {
+			await saveOpenAIKey(openaiKeyInput.trim());
+			openaiKeyGespeichert = true;
+		}
+	}
+
+	async function loescheOpenAIKey() {
+		await removeStoredItem(STORAGE_KEYS.OPENAI_API_KEY);
+		openaiKeyInput = '';
+		openaiKeyGespeichert = false;
+	}
+
 	function maskKey(key: string): string {
 		if (key.length <= 8) return '********';
 		return key.substring(0, 4) + '****' + key.substring(key.length - 4);
+	}
+
+	// Hexmap deletion
+	let hexmapsGeloescht = $state(false);
+	let confirmHexmapDelete = $state(false);
+
+	async function loescheHexmaps() {
+		if (!confirmHexmapDelete) {
+			confirmHexmapDelete = true;
+			return;
+		}
+		await removeStoredItem(STORAGE_KEYS.HEXMAPS);
+		hexmapsGeloescht = true;
+		confirmHexmapDelete = false;
+		// Reset after 3 seconds
+		setTimeout(() => {
+			hexmapsGeloescht = false;
+		}, 3000);
+	}
+
+	function abbrechenHexmapDelete() {
+		confirmHexmapDelete = false;
 	}
 
 	async function pruefeModels() {
@@ -138,6 +189,74 @@
 	</section>
 
 	<section class="settings-section">
+		<h2>OpenAI API Key (GPT-5.1 / gpt-image-1)</h2>
+		<p class="section-description">
+			OpenAI wird als <strong>Fallback für Text- und Bildgenerierung</strong> verwendet,
+			wenn Gemini durch Rate-Limits (429-Fehler) blockiert ist. Das System versucht erst Gemini,
+			wartet bei Rate-Limit 15 Sekunden und probiert erneut, dann wechselt es zu OpenAI.
+			Du kannst einen Key bei <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">OpenAI Platform</a> erstellen.
+		</p>
+
+		<div class="api-key-form">
+			<div class="input-group">
+				<label for="openai-key">OpenAI API Key</label>
+				<div class="input-with-toggle">
+					{#if showOpenAIKey}
+						<input
+							type="text"
+							id="openai-key"
+							bind:value={openaiKeyInput}
+							placeholder="sk-proj-..."
+							class="api-key-input"
+						/>
+					{:else}
+						<input
+							type="password"
+							id="openai-key"
+							bind:value={openaiKeyInput}
+							placeholder="sk-proj-..."
+							class="api-key-input"
+						/>
+					{/if}
+					<button
+						type="button"
+						class="toggle-visibility"
+						onclick={() => showOpenAIKey = !showOpenAIKey}
+						title={showOpenAIKey ? 'Key verstecken' : 'Key anzeigen'}
+					>
+						{showOpenAIKey ? '🙈' : '👁️'}
+					</button>
+				</div>
+			</div>
+
+			<div class="button-group">
+				<button
+					class="btn btn-primary"
+					onclick={speichereOpenAIKey}
+					disabled={!openaiKeyInput.trim()}
+				>
+					{openaiKeyGespeichert ? 'Key aktualisieren' : 'Key speichern'}
+				</button>
+				{#if openaiKeyGespeichert}
+					<button class="btn btn-danger" onclick={loescheOpenAIKey}>
+						Key löschen
+					</button>
+				{/if}
+			</div>
+
+			{#if openaiKeyGespeichert}
+				<p class="success-message">
+					OpenAI API Key ist gespeichert. GPT-5.1 wird für Textgenerierung verwendet.
+				</p>
+			{:else}
+				<p class="hint-text">
+					Ohne OpenAI Key wird Gemini für Textgenerierung verwendet (weniger kontextbewusste Bild-Prompts).
+				</p>
+			{/if}
+		</div>
+	</section>
+
+	<section class="settings-section">
 		<h2>API Diagnose</h2>
 		<p class="section-description">
 			Prüfe welche Models mit deinem API Key verfügbar sind. Die Ergebnisse erscheinen in der Browser-Konsole (F12).
@@ -186,6 +305,39 @@
 			<strong>Hinweis:</strong> Die Bildgenerierung benötigt eine aktive Internetverbindung
 			und verbraucht API-Kontingent bei Google.
 		</p>
+	</section>
+
+	<section class="settings-section">
+		<h2>Datenverwaltung</h2>
+		<p class="section-description">
+			Hier kannst du bestimmte Daten löschen. Die Orte und andere Daten bleiben erhalten.
+		</p>
+
+		<div class="data-management-item">
+			<div class="data-info">
+				<h4>Hexkarten-Daten</h4>
+				<p>Löscht alle Hex-Tiles und deren Bilder. Die Orte selbst bleiben erhalten und können erneut zugewiesen werden.</p>
+			</div>
+			<div class="data-actions">
+				{#if hexmapsGeloescht}
+					<p class="success-message compact">Hexkarten gelöscht!</p>
+				{:else if confirmHexmapDelete}
+					<div class="confirm-delete">
+						<span class="confirm-text">Wirklich löschen?</span>
+						<button class="btn btn-danger btn-sm" onclick={loescheHexmaps}>
+							Ja, löschen
+						</button>
+						<button class="btn btn-secondary btn-sm" onclick={abbrechenHexmapDelete}>
+							Abbrechen
+						</button>
+					</div>
+				{:else}
+					<button class="btn btn-danger" onclick={loescheHexmaps}>
+						Hexkarten löschen
+					</button>
+				{/if}
+			</div>
+		</div>
 	</section>
 </div>
 
@@ -376,5 +528,74 @@
 		margin-bottom: var(--space-xs);
 		font-size: 0.9rem;
 		color: #856404;
+	}
+
+	/* Data Management */
+	.data-management-item {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: var(--space-md);
+		background: var(--color-cream);
+		border-radius: var(--radius-md);
+		border: 1px solid var(--color-earth-light);
+		gap: var(--space-md);
+	}
+
+	.data-info h4 {
+		margin: 0 0 var(--space-xs) 0;
+		font-size: 1rem;
+		color: var(--color-bark);
+	}
+
+	.data-info p {
+		margin: 0;
+		font-size: 0.875rem;
+		color: var(--color-earth);
+	}
+
+	.data-actions {
+		flex-shrink: 0;
+	}
+
+	.confirm-delete {
+		display: flex;
+		align-items: center;
+		gap: var(--space-sm);
+	}
+
+	.confirm-text {
+		font-size: 0.875rem;
+		color: #dc3545;
+		font-weight: 600;
+	}
+
+	.btn-sm {
+		padding: var(--space-xs) var(--space-sm);
+		font-size: 0.8125rem;
+	}
+
+	.success-message.compact {
+		margin: 0;
+		padding: var(--space-xs) var(--space-sm);
+	}
+
+	@media (max-width: 600px) {
+		.data-management-item {
+			flex-direction: column;
+			align-items: flex-start;
+		}
+
+		.data-actions {
+			width: 100%;
+		}
+
+		.data-actions .btn {
+			width: 100%;
+		}
+
+		.confirm-delete {
+			flex-wrap: wrap;
+		}
 	}
 </style>

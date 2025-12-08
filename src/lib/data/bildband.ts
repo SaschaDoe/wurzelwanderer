@@ -123,6 +123,7 @@ export interface StoryPlan {
 	szenenPlaene: string[]; // 10 scene summaries/outlines
 	hauptkonflikt: string; // Main conflict
 	moral?: string; // Optional moral of the story
+	charakterEinfuehrungen: string[][]; // Which characters appear in each scene (by name)
 }
 
 /** Status of a Bildband */
@@ -152,6 +153,7 @@ export interface GespeicherterBildband {
 /** Context for scene generation */
 export interface SzenenKontext {
 	charaktere: GenerierterBekannter[];
+	bekannte: GenerierterBekannter[]; // NPCs that appear in the story
 	aktuelleRegion: GespeicherteRegion;
 	aktuellerOrt: Naturell;
 	zweiterOrt?: {
@@ -160,6 +162,7 @@ export interface SzenenKontext {
 	};
 	bisherigeSzenen: BildbandSzene[];
 	szenenDefinition: SzenenDefinition;
+	storyPlan?: StoryPlan; // The overall story plan for context
 	userAnmerkung?: string;
 }
 

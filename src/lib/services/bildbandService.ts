@@ -4,6 +4,7 @@
  */
 
 import { getApiKey } from './geminiService';
+import { hasOpenAIKey, generateText as generateOpenAIText, generateImagePrompt as generateSmartImagePrompt } from './openaiService';
 import { GEMINI_API_BASE, REQUEST_TIMEOUT_MS, IMAGE_MODELS, TEXT_MODEL } from '$lib/constants/api';
 import {
 	type BildbandSzene,
@@ -126,6 +127,143 @@ async function callTextApi(
 }
 
 /**
+ * Unified text generation: Uses OpenAI GPT-5.1 if available, falls back to Gemini
+ */
+async function generateText(
+	prompt: string,
+	options?: { systemPrompt?: string; temperature?: number }
+): Promise<{ success: boolean; text?: string; error?: string }> {
+	// Try OpenAI first if available
+	if (hasOpenAIKey()) {
+		console.log('[Bildband] Verwende GPT-5.1 für Textgenerierung...');
+		const result = await generateOpenAIText(prompt, {
+			systemPrompt: options?.systemPrompt,
+			temperature: options?.temperature ?? 0.9,
+			maxTokens: 4096
+		});
+		if (result.success) {
+			return result;
+		}
+		console.warn('[Bildband] GPT-5.1 fehlgeschlagen, versuche Gemini:', result.error);
+	}
+
+	// Fallback to Gemini
+	console.log('[Bildband] Verwende Gemini für Textgenerierung...');
+	const apiKey = await getApiKey();
+	if (!apiKey) {
+		return { success: false, error: 'Kein API Key vorhanden' };
+	}
+
+	// Combine system prompt with user prompt for Gemini (doesn't have system role)
+	const fullPrompt = options?.systemPrompt
+		? `${options.systemPrompt}\n\n---\n\n${prompt}`
+		: prompt;
+
+	return callTextApi(fullPrompt, apiKey);
+}
+
+/**
+ * Review a rhyme for quality - checks if it actually rhymes and makes sense
+ * Returns: { approved: boolean, feedback?: string }
+ */
+async function reviewReim(
+	reim: string,
+	szenenDefinition: SzenenDefinition,
+	charaktere: string[],
+	bisherigeSzenen: string
+): Promise<{ approved: boolean; feedback?: string }> {
+	const systemPrompt = `Du bist ein strenger Literaturkritiker für deutsche Kinderreime im Stil von James Krüss und Wilhelm Busch.
+
+VORBILDER - SO KLINGEN GUTE DEUTSCHE KINDERREIME:
+
+James Krüss:
+"Wenn die Möpse Schnäpse trinken,
+wenn die Krebse Lefzen schminken,
+wenn die Hummer immer schlummer,
+dann ist Sommer, dann ist Sommer."
+
+Wilhelm Busch (Max und Moritz):
+"Ach, was muss man oft von bösen
+Kindern hören oder lesen!
+Wie zum Beispiel hier von diesen,
+welche Max und Moritz hießen."
+
+Christian Morgenstern:
+"Ein Wiesel saß auf einem Kiesel
+inmitten Bachgeriesel."
+
+MERKMALE GUTER REIME:
+- Natürlicher Sprachfluss, keine Verrenkungen
+- Klares Metrum (ta-DA-ta-DA oder DA-ta-DA-ta)
+- Echte, saubere Reime
+- Kurze, prägnante Sätze
+- Märchenhafter, poetischer Ton
+
+PRÜFKRITERIEN - SEI STRENG BEI DIESEN PUNKTEN:
+
+1. KEINE FÜLLWÖRTER als Reimlösung:
+   - VERBOTEN: "sowieso", "irgendwie", "halt", "eben", "nun mal", "ganz genau"
+   - Diese zeigen, dass der Autor keine echte Reimlösung gefunden hat
+   - Wenn ein Vers auf so einem Füllwort endet = REJECTED
+
+2. GRAMMATIK muss stimmen:
+   - "Dein Kunst" statt "Deine Kunst" = REJECTED
+   - Fehlende Wörter ("Gutes tun" statt "Gutes tun kann") = REJECTED
+   - Apostrophe um Reime zu erzwingen ("beschloss'n") = REJECTED
+
+3. KEINE ERFUNDENEN WÖRTER:
+   - "bangst", "frohst", "traurist", "Überdratt", "beschloss'n" etc. existieren NICHT = REJECTED
+   - Wörter die auf -st enden um Verben zu "konjugieren" sind meist FALSCH
+   - Wenn ein Wort seltsam oder erfunden klingt = REJECTED
+   - Im Zweifel: Wenn du das Wort noch nie gehört hast, ist es wahrscheinlich erfunden
+
+4. METRUM - gleichmäßiger Rhythmus:
+   - Alle Zeilen sollten ähnliche Länge/Betonung haben
+   - Holprige Zeilen, die den Lesefluss stören = REJECTED
+
+5. MÄRCHENHAFTER TON:
+   - Umgangssprache vermeiden
+   - Poetisch und kindgerecht
+
+WENIGER WICHTIG:
+- Reimschema: Solange es sich einigermaßen reimt, ist es OK
+- Unreine Reime sind akzeptabel
+
+Du antwortest NUR mit:
+- "APPROVED" wenn der Reim wirklich gut ist (wie die Vorbilder!)
+- "REJECTED: [konkrete Kritik]" wenn etwas nicht stimmt
+
+Sei STRENG! Lieber einmal zu viel ablehnen als schlechte Reime durchlassen.`;
+
+	const prompt = `SZENE: ${szenenDefinition.nummer}. ${szenenDefinition.titel}
+SZENEN-TYP: ${szenenDefinition.beschreibung}
+CHARAKTERE: ${charaktere.join(', ')}
+BISHERIGE HANDLUNG: ${bisherigeSzenen}
+
+ZU PRÜFENDER REIM:
+${reim}
+
+Prüfe diesen Reim nach den Kriterien. Antworte mit APPROVED oder REJECTED: [Grund]`;
+
+	const result = await generateText(prompt, { systemPrompt, temperature: 0.3 });
+
+	if (!result.success || !result.text) {
+		// If review fails, approve by default to not block generation
+		console.warn('[Bildband] Reim-Review fehlgeschlagen, akzeptiere Reim');
+		return { approved: true };
+	}
+
+	const response = result.text.trim().toUpperCase();
+	if (response.startsWith('APPROVED')) {
+		return { approved: true };
+	}
+
+	// Extract feedback from rejection
+	const feedback = result.text.replace(/^REJECTED:\s*/i, '').trim();
+	return { approved: false, feedback };
+}
+
+/**
  * Internal helper to call Gemini image API with optional reference images
  */
 async function callImageApi(
@@ -243,13 +381,39 @@ Style: Classic German fairy-tale children's book illustration like Fritz Baumgar
 /**
  * Build character description for prompts
  */
-function beschreibeCharaktere(charaktere: GenerierterBekannter[]): string {
+function beschreibeCharaktere(charaktere: GenerierterBekannter[], mitDetails: boolean = false): string {
 	return charaktere
 		.map((c) => {
 			const berufe = c.berufe.join(' und ');
-			return `${c.name} (${c.geschlecht === 'weiblich' ? 'weibliche' : 'männlicher'} ${c.tier}, ${berufe}, ${c.merkmal.name})`;
+			const held = c.istHeld ? '[HELD] ' : '';
+			let beschreibung = `${held}${c.name} (${c.geschlecht === 'weiblich' ? 'weibliche' : 'männlicher'} ${c.tier}, ${berufe}, ${c.merkmal.name})`;
+
+			// Add detailed traits for heroes
+			if (mitDetails && c.istHeld) {
+				const details: string[] = [];
+				if (c.charakterKlasse) {
+					details.push(`Klasse: ${c.charakterKlasse.name} - ${c.charakterKlasse.besonders}`);
+				}
+				if (c.merkmal.aktionen && c.merkmal.aktionen.length > 0) {
+					details.push(`Fähigkeiten: ${c.merkmal.aktionen.join(', ')}`);
+				}
+				if (c.merkmal.beschreibung) {
+					details.push(`Eigenart: ${c.merkmal.beschreibung}`);
+				}
+				if (details.length > 0) {
+					beschreibung += `\n   → ${details.join('\n   → ')}`;
+				}
+			}
+			return beschreibung;
 		})
-		.join(', ');
+		.join('\n');
+}
+
+/**
+ * Get heroes from character list
+ */
+function getHelden(charaktere: GenerierterBekannter[]): GenerierterBekannter[] {
+	return charaktere.filter(c => c.istHeld === true);
 }
 
 /**
@@ -319,15 +483,12 @@ export async function generiereBekannte(
 		const beruf = getRandomElement(merkmal.berufe);
 
 		// Generate a name using LLM
-		const apiKey = await getApiKey();
 		let name = `Bekannter ${i + 1}`;
 
-		if (apiKey) {
-			const namePrompt = `Gib mir EINEN kurzen, fantasievollen deutschen Namen für einen ${geschlecht === 'weiblich' ? 'weiblichen' : 'männlichen'} ${tier} in einem deutschen Kinderbuch-Märchen. Der Name sollte zum Tier passen und märchenhaft klingen. Antworte NUR mit dem Namen, keine Erklärungen.`;
-			const result = await callTextApi(namePrompt, apiKey);
-			if (result.success && result.text) {
-				name = result.text.trim().split('\n')[0].replace(/['"]/g, '');
-			}
+		const namePrompt = `Gib mir EINEN kurzen, fantasievollen deutschen Namen für einen ${geschlecht === 'weiblich' ? 'weiblichen' : 'männlichen'} ${tier} in einem deutschen Kinderbuch-Märchen. Der Name sollte zum Tier passen und märchenhaft klingen. Antworte NUR mit dem Namen, keine Erklärungen.`;
+		const result = await generateText(namePrompt, { temperature: 0.9 });
+		if (result.success && result.text) {
+			name = result.text.trim().split('\n')[0].replace(/['"]/g, '');
 		}
 
 		bekannte.push({
@@ -344,7 +505,11 @@ export async function generiereBekannte(
 }
 
 /**
- * Pre-plan the entire story before generating individual scenes
+ * Pre-plan the entire story before generating individual scenes.
+ * Uses a multi-round approach for better story coherence:
+ * 1. Brainstorm character relationships
+ * 2. Develop story concept
+ * 3. Create final scene plan
  */
 export async function planeGeschichte(
 	charaktere: GenerierterBekannter[],
@@ -353,67 +518,150 @@ export async function planeGeschichte(
 	startOrt: Naturell,
 	zweiterOrt: { region: GespeicherteRegion; ort: Naturell }
 ): Promise<StoryPlan> {
-	const apiKey = await getApiKey();
-	if (!apiKey) throw new Error('Kein API Key vorhanden.');
 
-	const charakterBeschreibung = beschreibeCharaktere(charaktere);
+	// Use detailed description for heroes
+	const charakterBeschreibung = beschreibeCharaktere(charaktere, true);
 	const bekannteBeschreibung = beschreibeCharaktere(bekannte);
 	const startBeschreibung = `${startOrt.name} in ${beschreibeRegion(startRegion)}`;
 	const zielBeschreibung = `${zweiterOrt.ort.name} in ${beschreibeRegion(zweiterOrt.region)}`;
 
-	const prompt = `Du bist ein erfahrener Kinderbuch-Autor für deutsche Märchen-Fabeln im Stil von Beatrix Potter und Fritz Baumgarten.
+	const systemPrompt = `Du bist ein erfahrener Kinderbuch-Autor für deutsche Märchen-Fabeln im Stil von Beatrix Potter und Fritz Baumgarten.`;
 
-DEINE AUFGABE: Denke dir eine vollständige Fabel-Geschichte aus mit folgendem Material:
+	// ========== RUNDE 1: CHARAKTERBEZIEHUNGEN BRAINSTORMEN ==========
+	console.log('[Bildband] Runde 1: Brainstorme Charakterbeziehungen...');
 
-HAUPTCHARAKTERE (Helden der Geschichte):
+	const brainstormPrompt = `Du planst eine Kindergeschichte. Bevor du die Geschichte schreibst, musst du dir überlegen wie die Charaktere ZUEINANDER PASSEN.
+
+HAUPTCHARAKTERE (vom Spieler gewählt):
 ${charakterBeschreibung}
 
-NEBENCHARAKTERE (Bekannte, die sie treffen):
+NEBENCHARAKTERE (Bekannte, die dazukommen):
 ${bekannteBeschreibung}
 
-STARTORT: ${startBeschreibung}
-ZIELORT (nach der Reise): ${zielBeschreibung}
+DEINE AUFGABE: Überlege dir LOGISCHE BEZIEHUNGEN zwischen den Charakteren!
 
-Die Geschichte folgt dieser 10-Szenen-Struktur:
-1. Der Ort - Einführung des Startortes
-2. Die Gefährten - Vorstellung der Hauptcharaktere
-3. Das Problem - Ein Problem oder Konflikt taucht auf
-4. Das Ziel - Die Charaktere setzen sich ein Ziel
-5. Der Weg - Sie verfolgen ihr Ziel
-6. Die Reise - Ortswechsel zum neuen Ort
-7. Neues Land - Ankunft am Zielort
-8. Die Wendung - Ein Twist oder neues Hindernis
-9. Der Triumph - Sie überwinden das Problem
-10. Das Ende - Abschluss der Geschichte
+Beispiele für gute Beziehungen:
+- Familie: "Silberfell ist Ellers Enkelin, die er großgezogen hat"
+- Freundschaft: "Funkelblüte ist Ellers alte Studienfreundin aus Jugendtagen"
+- Mentor/Schüler: "Der alte Eller unterrichtet die junge Funkelblüte in der Heilkunst"
+- Nachbarn: "Sie wohnen alle im selben Baumhaus-Viertel"
+- Reisegefährten: "Sie treffen sich zufällig auf dem Marktplatz und beschließen gemeinsam zu reisen"
+- Beruflich: "Funkelblüte ist die Assistentin von Professor Eller"
 
 WICHTIG:
-- Die Geschichte soll märchenhaft und fabelhaft sein
-- Die Nebencharaktere (${bekannte.map((b) => b.name).join(', ')}) sollen aktiv in der Geschichte vorkommen
-- Es soll DIALOGE und INTERAKTIONEN zwischen den Charakteren geben
-- Die Geschichte soll eine kleine Moral oder Weisheit beinhalten
-- Denke an Konflikte, Freundschaft, Mut, Zusammenhalt
+- Die Beziehungen müssen zu den Charakteren PASSEN (Alter, Beruf, Persönlichkeit)
+- Ein weiser alter Hirsch mit einer jungen Füchsin? Vielleicht Großvater/Enkelin oder Lehrer/Schülerin
+- Die Gruppe muss einen GRUND haben, zusammen zu sein!
 
-Antworte im folgenden Format:
+Antworte mit 2-3 verschiedenen Ideen für Beziehungen:
 
-ZUSAMMENFASSUNG: [2-3 Sätze, die die gesamte Geschichte beschreiben]
+IDEE 1: [Beschreibe wie die Charaktere zueinander stehen könnten]
+IDEE 2: [Alternative Beziehungskonstellation]
+IDEE 3: [Noch eine Möglichkeit]
 
-HAUPTKONFLIKT: [Was ist das zentrale Problem der Geschichte?]
+BESTE IDEE: [Welche Idee funktioniert am besten und warum?]`;
 
-MORAL: [Die Weisheit oder Lehre der Geschichte]
+	const brainstormResult = await generateText(brainstormPrompt, { systemPrompt, temperature: 0.9 });
+	const beziehungen = brainstormResult.success ? brainstormResult.text : '';
+	console.log(`[Bildband] Beziehungs-Brainstorm:\n${beziehungen?.substring(0, 500)}...`);
 
-SZENE 1: [Kurze Beschreibung was in Szene 1 passiert]
-SZENE 2: [Kurze Beschreibung was in Szene 2 passiert]
-SZENE 3: [Kurze Beschreibung was in Szene 3 passiert]
-SZENE 4: [Kurze Beschreibung was in Szene 4 passiert]
-SZENE 5: [Kurze Beschreibung was in Szene 5 passiert]
-SZENE 6: [Kurze Beschreibung was in Szene 6 passiert]
-SZENE 7: [Kurze Beschreibung was in Szene 7 passiert]
-SZENE 8: [Kurze Beschreibung was in Szene 8 passiert]
-SZENE 9: [Kurze Beschreibung was in Szene 9 passiert]
-SZENE 10: [Kurze Beschreibung was in Szene 10 passiert]`;
+	// ========== RUNDE 2: STORY-KONZEPT ENTWICKELN ==========
+	console.log('[Bildband] Runde 2: Entwickle Story-Konzept...');
 
-	console.log('[Bildband] Plane Geschichte...');
-	const result = await callTextApi(prompt, apiKey);
+	const konzeptPrompt = `Basierend auf den Charakterbeziehungen, entwickle jetzt ein STORY-KONZEPT.
+
+CHARAKTERE UND IHRE BEZIEHUNGEN:
+${beziehungen}
+
+ORTE:
+- START: ${startBeschreibung}
+- ZIEL: ${zielBeschreibung}
+
+DEINE AUFGABE: Entwickle eine einfache, klare Kindergeschichte!
+
+Eine gute Kindergeschichte hat:
+- Einen EINFACHEN, KLAREN Konflikt (nicht zu kompliziert!)
+- Einen GRUND warum die Gruppe reist
+- EMOTIONALE Momente (Angst, Freude, Zusammenhalt)
+- Eine MORAL die Kinder verstehen
+
+SCHLECHTE Ideen (vermeide!):
+- Zu komplizierte Plots (Magnetberge die Fische stören...)
+- Abstrakte Konflikte die Kinder nicht verstehen
+- Zu viele Nebenhandlungen
+
+GUTE Ideen:
+- "Opa Eller nimmt seine Enkel mit auf eine Reise um ihnen etwas Wichtiges zu zeigen"
+- "Die Freunde suchen ein verlorenes Familienerbstück"
+- "Ein Freund ist krank und sie suchen ein Heilkraut"
+- "Sie wollen zu einem Fest/einer Feier im anderen Tal"
+
+Antworte:
+
+BEZIEHUNG: [Wie stehen die Charaktere zueinander? 1 Satz]
+GRUND DER REISE: [Warum reisen sie? 1 Satz]
+KONFLIKT: [Was ist das Problem? 1 Satz - EINFACH!]
+LÖSUNG: [Wie wird es gelöst? 1 Satz]
+MORAL: [Was lernen die Kinder? 1 Satz]`;
+
+	const konzeptResult = await generateText(konzeptPrompt, { systemPrompt, temperature: 0.8 });
+	const konzept = konzeptResult.success ? konzeptResult.text : '';
+	console.log(`[Bildband] Story-Konzept:\n${konzept}`);
+
+	// ========== RUNDE 3: FINALER SZENEN-PLAN ==========
+	console.log('[Bildband] Runde 3: Erstelle finalen Szenen-Plan...');
+
+	const finalPrompt = `Jetzt schreibe den FINALEN SZENEN-PLAN basierend auf dem Konzept.
+
+STORY-KONZEPT:
+${konzept}
+
+CHARAKTERE:
+- Hauptcharaktere: ${charaktere.map(c => c.name).join(', ')}
+- Nebencharaktere: ${bekannte.map(b => b.name).join(', ')}
+
+ORTE:
+- START: ${startBeschreibung}
+- ZIEL (ab Szene 6): ${zielBeschreibung}
+
+DIE 10 SZENEN:
+1. Der Ort - NUR Landschaft, KEINE Charaktere
+2. Die Gefährten - Hauptcharaktere werden vorgestellt, ihre Beziehung erklärt
+3. Das Problem - Der Grund für die Reise wird klar
+4. Das Ziel - Sie beschließen loszugehen
+5. Der Weg - Unterwegs passiert etwas
+6. Die Reise - Sie kommen am neuen Ort an
+7. Neues Land - Was sie dort entdecken
+8. Die Wendung - Ein kleines Hindernis
+9. Der Triumph - Sie lösen das Problem
+10. Das Ende - Glücklicher Abschluss
+
+REGELN FÜR CHARAKTERE:
+- Szene 1: KEINE Charaktere (nur Landschaft)
+- Szene 2: Nur HAUPTCHARAKTERE (${charaktere.map(c => c.name).join(', ')})
+- Nebencharaktere (${bekannte.map(b => b.name).join(', ')}) erscheinen SPÄTER, wenn es zur Geschichte passt
+- Wenn Nebencharaktere erscheinen, müssen sie VORGESTELLT werden (wer sind sie, warum sind sie da?)
+
+Antworte im Format:
+
+ZUSAMMENFASSUNG: [2-3 Sätze über die ganze Geschichte]
+
+HAUPTKONFLIKT: [Der einfache, klare Konflikt]
+
+MORAL: [Die Lehre für Kinder]
+
+SZENE 1: [Nur Landschaftsbeschreibung] | CHARAKTERE: keine
+SZENE 2: [Was passiert, Beziehung wird erklärt] | CHARAKTERE: ${charaktere.map(c => c.name).join(', ')}
+SZENE 3: [Beschreibung] | CHARAKTERE: [Namen]
+SZENE 4: [Beschreibung] | CHARAKTERE: [Namen]
+SZENE 5: [Beschreibung] | CHARAKTERE: [Namen]
+SZENE 6: [Beschreibung] | CHARAKTERE: [Namen]
+SZENE 7: [Beschreibung] | CHARAKTERE: [Namen]
+SZENE 8: [Beschreibung] | CHARAKTERE: [Namen]
+SZENE 9: [Beschreibung] | CHARAKTERE: [Namen]
+SZENE 10: [Beschreibung] | CHARAKTERE: [Namen]`;
+
+	const result = await generateText(finalPrompt, { systemPrompt, temperature: 0.7 });
 
 	if (!result.success || !result.text) {
 		throw new Error(result.error || 'Story-Planung fehlgeschlagen');
@@ -427,16 +675,42 @@ SZENE 10: [Kurze Beschreibung was in Szene 10 passiert]`;
 	const moralMatch = text.match(/MORAL:\s*(.+?)(?=\n\n|SZENE 1)/is);
 
 	const szenenPlaene: string[] = [];
+	const charakterEinfuehrungen: string[][] = [];
+
+	// Get all character names for matching
+	const alleNamen = [...charaktere.map(c => c.name), ...bekannte.map(b => b.name)];
+
 	for (let i = 1; i <= 10; i++) {
-		const szeneMatch = text.match(new RegExp(`SZENE ${i}:\\s*(.+?)(?=\\n\\n|SZENE ${i + 1}|$)`, 'is'));
-		szenenPlaene.push(szeneMatch?.[1]?.trim() || `Szene ${i}`);
+		const szeneMatch = text.match(new RegExp(`SZENE ${i}:\\s*(.+?)(?=\\n|SZENE ${i + 1}|$)`, 'is'));
+		const szeneText = szeneMatch?.[1]?.trim() || `Szene ${i}`;
+
+		// Parse: "Beschreibung | CHARAKTERE: Name1, Name2" or "Beschreibung | CHARAKTERE: keine"
+		const parts = szeneText.split('|');
+		const beschreibung = parts[0]?.trim() || szeneText;
+		szenenPlaene.push(beschreibung);
+
+		// Extract character names from CHARAKTERE section
+		const charakterePart = parts[1]?.trim() || '';
+		const charaktereMatch = charakterePart.match(/CHARAKTERE:\s*(.+)/i);
+		const charaktereText = charaktereMatch?.[1]?.trim().toLowerCase() || '';
+
+		if (charaktereText === 'keine' || charaktereText === '' || charaktereText === 'keine charaktere') {
+			charakterEinfuehrungen.push([]);
+		} else {
+			// Find which character names are mentioned
+			const gefundeneCharaktere = alleNamen.filter(name =>
+				charaktereText.toLowerCase().includes(name.toLowerCase())
+			);
+			charakterEinfuehrungen.push(gefundeneCharaktere);
+		}
 	}
 
 	return {
 		zusammenfassung: zusammenfassungMatch?.[1]?.trim() || 'Eine märchenhafte Geschichte.',
 		hauptkonflikt: konfliktMatch?.[1]?.trim() || 'Die Helden müssen ein Abenteuer bestehen.',
 		moral: moralMatch?.[1]?.trim(),
-		szenenPlaene
+		szenenPlaene,
+		charakterEinfuehrungen
 	};
 }
 
@@ -448,10 +722,8 @@ export async function generiereReim(
 	storyPlan?: StoryPlan,
 	bekannte?: GenerierterBekannter[]
 ): Promise<string> {
-	const apiKey = await getApiKey();
-	if (!apiKey) throw new Error('Kein API Key vorhanden.');
-
-	const charakterBeschreibung = beschreibeCharaktere(kontext.charaktere);
+	// Use detailed description that includes hero markers
+	const charakterBeschreibung = beschreibeCharaktere(kontext.charaktere, true);
 	const ortBeschreibung = beschreibeOrt(kontext.aktuellerOrt, kontext.aktuelleRegion);
 	const regionBeschreibung = beschreibeRegion(kontext.aktuelleRegion);
 	const bisherig = fasseBisherigeSzenenZusammen(kontext.bisherigeSzenen);
@@ -471,44 +743,162 @@ export async function generiereReim(
 		? `\nNEBENCHARAKTERE (können in der Geschichte auftauchen): ${beschreibeCharaktere(bekannte)}`
 		: '';
 
-	const prompt = `Du bist ein begnadeter Geschichtenerzähler für deutsche Märchen-Fabeln im Stil von klassischen Kinderbüchern.
-Schreibe einen Reim (8 Zeilen, 2 Strophen à 4 Zeilen) für folgende Szene:
+	// Hero focus hint
+	const helden = getHelden(kontext.charaktere);
+	const heldenHinweis = helden.length > 0
+		? `\n\nHELDEN-FOKUS: ${helden.map(h => h.name).join(' und ')} ${helden.length === 1 ? 'ist der HELD' : 'sind die HELDEN'} dieser Geschichte!
+- ${helden.length === 1 ? 'Gib diesem Charakter' : 'Gib diesen Charakteren'} mehr Zeilen und Aufmerksamkeit
+- Zeige ihre besonderen Eigenschaften: ${helden.map(h => `${h.name} (${h.merkmal.name})`).join(', ')}
+- Lass sie wichtige Entscheidungen treffen oder mutig handeln`
+		: '';
+
+	const systemPrompt = `Du bist ein Meister deutscher Kinderlyrik im Stil von James Krüss und Wilhelm Busch.
+
+DEINE VORBILDER:
+
+James Krüss - natürlich fließend, spielerisch:
+"Wenn die Möpse Schnäpse trinken,
+wenn die Krebse Lefzen schminken,
+wenn die Hummer immer schlummer,
+dann ist Sommer, dann ist Sommer."
+
+Wilhelm Busch - perfektes Metrum, prägnant:
+"Ach, was muss man oft von bösen
+Kindern hören oder lesen!
+Wie zum Beispiel hier von diesen,
+welche Max und Moritz hießen."
+
+DEIN STIL:
+- Natürlicher Sprachfluss ohne Verrenkungen
+- Klares Metrum: ta-DA-ta-DA-ta-DA oder DA-ta-DA-ta-DA
+- Saubere, echte Reime
+- Kurze, prägnante Sätze
+- Märchenhaft und poetisch`;
+
+	const MAX_REVIEW_ATTEMPTS = 2;
+
+	// Determine which characters should appear in this scene based on story plan
+	const szenenIndex = kontext.szenenDefinition.nummer - 1;
+	const erlaubteCharaktereNamen = storyPlan?.charakterEinfuehrungen?.[szenenIndex] || [];
+	const istSzene1 = kontext.szenenDefinition.nummer === 1;
+
+	// Filter characters to only those allowed in this scene
+	const szenenCharaktere = erlaubteCharaktereNamen.length > 0
+		? kontext.charaktere.filter(c => erlaubteCharaktereNamen.includes(c.name))
+		: [];
+	const szenenBekannte = erlaubteCharaktereNamen.length > 0 && bekannte
+		? bekannte.filter(b => erlaubteCharaktereNamen.includes(b.name))
+		: [];
+
+	const charakterNamen = [...szenenCharaktere.map(c => c.name), ...szenenBekannte.map(b => b.name)];
+
+	console.log(`[Bildband] Szene ${kontext.szenenDefinition.nummer} Reim - Erlaubte Charaktere: ${charakterNamen.length > 0 ? charakterNamen.join(', ') : 'KEINE'}`);
+
+	// Generate rhyme with review loop
+	for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS + 1; attempt++) {
+		const previousFeedback = attempt > 1
+			? `\n\nWICHTIG - VORHERIGER VERSUCH WURDE ABGELEHNT!
+Der Kritiker hat folgendes bemängelt: ${(kontext as any)._lastReviewFeedback}
+Bitte korrigiere diese Fehler im neuen Versuch!`
+			: '';
+
+		// Special handling for Scene 1 (location only, no characters!)
+		let prompt: string;
+
+		if (istSzene1) {
+			prompt = `Schreibe einen kurzen Reim (4 Zeilen) der NUR den ORT beschreibt:
+
+SZENE 1: Der Ort
+AUFGABE: Beschreibe NUR die Landschaft/den Ort - atmosphärisch und stimmungsvoll.
+
+ORT: ${ortBeschreibung}
+REGION: ${regionBeschreibung}
+
+WICHTIG:
+- KEINE Charaktere erwähnen!
+- KEINE Namen nennen!
+- KEINE Dialoge!
+- NUR die Natur/Landschaft/Atmosphäre beschreiben
+- Wie sieht es aus? Wie riecht es? Welche Stimmung?
+
+Beispiel-Stil:
+"Im Tal, wo Pilze riesig wachsen,
+wo Moos bedeckt die alten Fachsen,
+da liegt ein See so still und klar,
+wie er seit hundert Jahren war."
+
+STRENGE REGELN:
+- Schreibe auf Deutsch, märchenhaft-poetisch
+- GENAU 4 Zeilen (1 Strophe)
+- Reimschema AABB: Zeile 1+2 reimen, Zeile 3+4 reimen
+- VERBOTEN: Erfundene Wörter!
+- NUR echte deutsche Wörter verwenden!
+- Antworte NUR mit dem Reim, keine Erklärungen`;
+		} else {
+			// Build character section only for allowed characters
+			const charakterSection = charakterNamen.length > 0
+				? `\nCHARAKTERE IN DIESER SZENE:\n${szenenCharaktere.map(c => `- ${c.name} (${c.tier}, ${c.merkmal.name})`).join('\n')}${szenenBekannte.length > 0 ? '\n' + szenenBekannte.map(b => `- ${b.name} (${b.tier}, ${b.merkmal.name})`).join('\n') : ''}\n\nErwähne NUR diese Charaktere beim Namen!`
+				: '\nKEINE Charaktere in dieser Szene - beschreibe nur was passiert/zu sehen ist.';
+
+			prompt = `Schreibe einen Reim für folgende Szene:
 
 SZENE ${kontext.szenenDefinition.nummer}: ${kontext.szenenDefinition.titel}
 SZENEN-TYP: ${kontext.szenenDefinition.beschreibung}
 HINWEIS: ${kontext.szenenDefinition.promptHinweis}
 ${szenenPlan ? `\nWAS IN DIESER SZENE PASSIERT: ${szenenPlan}` : ''}
-${storyKontext}
-HAUPTCHARAKTERE: ${charakterBeschreibung}${bekannteBeschreibung}
+${storyKontext}${charakterSection}${heldenHinweis}
 
 ORT: ${ortBeschreibung}
 REGION: ${regionBeschreibung}
 
 BISHERIGE SZENEN:
-${bisherig}${anmerkung}
+${bisherig}${anmerkung}${previousFeedback}
 
-WICHTIGE REGELN:
-- Schreibe auf Deutsch
-- GENAU 8 Zeilen: 2 Strophen mit je 4 Zeilen
-- Reimschema: AABB (Paarreim) für jede Strophe
-- Märchenhaft, poetisch und lebendig
-- WICHTIG: Baue DIREKTE REDE ein! Die Charaktere sollen sprechen!
-  z.B. "Kommt, Freunde", rief der Dachs, "wir müssen fort!"
-- Zeige INTERAKTIONEN zwischen den Charakteren
-- Erwähne die Charaktere beim Namen
-- Passe zum Szenen-Typ
-- Leere Zeile zwischen den Strophen
-- Antworte NUR mit dem Reim, keine Erklärungen oder Überschriften`;
+STRENGE REGELN:
+- Schreibe auf Deutsch, märchenhaft-poetisch
+- 4 BIS 8 Zeilen - du entscheidest was besser passt (1-2 Strophen)
+- Reimschema AABB: Paarreime (Zeile 1+2 reimen, Zeile 3+4 reimen)
+- VERBOTEN als Reimwörter: "sowieso", "irgendwie", "halt", "eben", "ganz genau"
+- VERBOTEN: Apostrophe um Reime zu erzwingen ("beschloss'n", "war'n")
+- VERBOTEN: Erfundene Wörter! ("bangst", "frohst", "Überdratt" etc. existieren NICHT)
+- NUR echte deutsche Wörter verwenden!
+- Grammatik muss stimmen! ("Deine Kunst" nicht "Dein Kunst")
+- Gleichmäßiges Metrum in allen Zeilen
+- Gerne DIREKTE REDE einbauen wenn Charaktere da sind
+- Antworte NUR mit dem Reim, keine Erklärungen`;
+		}
 
-	console.log(`[Bildband] Generiere Reim für Szene ${kontext.szenenDefinition.nummer}...`);
+		console.log(`[Bildband] Generiere Reim für Szene ${kontext.szenenDefinition.nummer} (Versuch ${attempt})...`);
 
-	const result = await callTextApi(prompt, apiKey);
+		const result = await generateText(prompt, { systemPrompt });
 
-	if (!result.success || !result.text) {
-		throw new Error(result.error || 'Reim-Generierung fehlgeschlagen');
+		if (!result.success || !result.text) {
+			throw new Error(result.error || 'Reim-Generierung fehlgeschlagen');
+		}
+
+		const reim = result.text.trim();
+
+		// Skip review on last attempt - accept whatever we got
+		if (attempt > MAX_REVIEW_ATTEMPTS) {
+			console.log(`[Bildband] Max Versuche erreicht, akzeptiere Reim für Szene ${kontext.szenenDefinition.nummer}`);
+			return reim;
+		}
+
+		// Review the rhyme
+		console.log(`[Bildband] Prüfe Reim für Szene ${kontext.szenenDefinition.nummer}...`);
+		const review = await reviewReim(reim, kontext.szenenDefinition, charakterNamen, bisherig);
+
+		if (review.approved) {
+			console.log(`[Bildband] Reim für Szene ${kontext.szenenDefinition.nummer} APPROVED`);
+			return reim;
+		}
+
+		console.log(`[Bildband] Reim für Szene ${kontext.szenenDefinition.nummer} REJECTED: ${review.feedback}`);
+		(kontext as any)._lastReviewFeedback = review.feedback;
 	}
 
-	return result.text.trim();
+	// This shouldn't be reached, but just in case
+	throw new Error('Reim-Generierung fehlgeschlagen nach allen Versuchen');
 }
 
 /**
@@ -532,18 +922,153 @@ export async function generiereSzenenBild(
 	const apiKey = await getApiKey();
 	if (!apiKey) return { fehler: true };
 
-	// Collect character portraits for reference
+	// Determine which characters should appear in this scene
+	const szenenIndex = szene.nummer - 1;
+	const erlaubteCharaktere = kontext.storyPlan?.charakterEinfuehrungen?.[szenenIndex] || [];
+
+	// Filter characters to only those that should appear in this scene
+	const sichtbareCharaktere = erlaubteCharaktere.length > 0
+		? kontext.charaktere.filter(c => erlaubteCharaktere.includes(c.name))
+		: []; // If no characters specified, show none (e.g., Scene 1 = just location)
+
+	const sichtbareBekannte = erlaubteCharaktere.length > 0
+		? (kontext.bekannte || []).filter(b => erlaubteCharaktere.includes(b.name))
+		: [];
+
+	console.log(`[Bildband] Szene ${szene.nummer}: Charaktere im Bild: ${erlaubteCharaktere.length > 0 ? erlaubteCharaktere.join(', ') : 'keine'}`);
+
+	// Collect character portraits for reference (only for visible characters)
 	const referenceImages: string[] = [];
-	const charakterBeschreibungen = kontext.charaktere
-		.map((c, index) => {
-			const berufe = c.berufe.join(' and ');
-			const hasPortrait = c.bild ? ` (shown in reference image ${index + 1})` : '';
-			if (c.bild) {
-				referenceImages.push(c.bild);
-			}
-			return `${c.name}: a ${c.geschlecht === 'weiblich' ? 'female' : 'male'} ${c.tier} who is a ${berufe}, personality: ${c.merkmal.name}${hasPortrait}`;
-		})
-		.join('; ');
+
+	// Add main character portraits (only visible ones)
+	for (const c of sichtbareCharaktere) {
+		if (c.bild) {
+			referenceImages.push(c.bild);
+		}
+	}
+
+	// Add bekannte portraits if available (only visible ones)
+	for (const b of sichtbareBekannte) {
+		if (b.bild) {
+			referenceImages.push(b.bild);
+		}
+	}
+
+	// Try to use GPT-5.1 for smart prompt generation
+	let prompt: string;
+
+	if (hasOpenAIKey()) {
+		console.log(`[Bildband] Verwende GPT-5.1 für intelligenten Bild-Prompt...`);
+
+		// Build context for GPT-5.1 - only include visible characters!
+		const smartPromptResult = await generateSmartImagePrompt({
+			szenenNummer: szene.nummer,
+			szenenTitel: szene.titel,
+			szenenTyp: szene.typ,
+			reim: szene.reim,
+			storyPlan: kontext.storyPlan ? {
+				zusammenfassung: kontext.storyPlan.zusammenfassung,
+				szenenUebersicht: kontext.storyPlan.szenenPlaene.map((plan, i) => ({
+					nummer: i + 1,
+					kurzinhalt: plan
+				}))
+			} : undefined,
+			charaktere: sichtbareCharaktere.map((c) => ({
+				name: c.name,
+				tier: c.tier,
+				geschlecht: c.geschlecht,
+				berufe: c.berufe,
+				merkmalName: c.merkmal.name,
+				hatPortrait: !!c.bild
+			})),
+			bekannte: sichtbareBekannte.map(b => ({
+				name: b.name,
+				tier: b.tier,
+				geschlecht: b.geschlecht,
+				berufe: b.berufe,
+				merkmalName: b.merkmal.name
+			})),
+			aktuelleRegion: {
+				name: kontext.aktuelleRegion.name,
+				geographisch: kontext.aktuelleRegion.geographisch.map(g => g.promptText),
+				faunaFlora: kontext.aktuelleRegion.faunaFlora.map(f => f.promptText),
+				architektur: kontext.aktuelleRegion.architektur?.promptText
+			},
+			aktuellerOrt: {
+				name: kontext.aktuellerOrt.name,
+				beschreibung: kontext.aktuellerOrt.beschreibung
+			},
+			bisherigeSzenen: kontext.bisherigeSzenen.map(s => ({
+				nummer: s.nummer,
+				titel: s.titel,
+				kurzinhalt: s.reim.split('\n')[0] + '...'
+			}))
+		});
+
+		if (smartPromptResult.success && smartPromptResult.prompt) {
+			// Add reference image instruction and style guidance
+			const referenceInstruction = referenceImages.length > 0
+				? `\n\nIMPORTANT: Reference images are provided showing how main characters should look. Use these to maintain character consistency.`
+				: '';
+
+			prompt = `${smartPromptResult.prompt}
+
+Style: Fritz Baumgarten German children's book illustration, watercolor, fairy-tale, warm colors.
+Horizontal landscape format.${referenceInstruction}
+
+CRITICAL: ABSOLUTELY NO TEXT IN THE IMAGE!
+- No speech bubbles
+- No written words
+- No labels
+- No letters
+- No signs with writing
+- Pure illustration only!`;
+
+			console.log(`[Bildband] GPT-5.1 Prompt generiert (${prompt.length} Zeichen)`);
+		} else {
+			console.warn(`[Bildband] GPT-5.1 Prompt-Generierung fehlgeschlagen, nutze Fallback: ${smartPromptResult.error}`);
+			prompt = buildFallbackPrompt(szene, kontext, referenceImages.length, sichtbareCharaktere, sichtbareBekannte);
+		}
+	} else {
+		// Fallback: Use simple prompt without GPT-5.1
+		prompt = buildFallbackPrompt(szene, kontext, referenceImages.length, sichtbareCharaktere, sichtbareBekannte);
+	}
+
+	console.log(`[Bildband] Generiere Bild für Szene ${szene.nummer} mit ${referenceImages.length} Referenzbildern...`);
+
+	const result = await callImageApi(prompt, apiKey, referenceImages.length > 0 ? referenceImages : undefined);
+
+	if (!result.success || !result.imageData) {
+		console.error(`[Bildband] Bild-Generierung fehlgeschlagen: ${result.error}`);
+		return { fehler: true };
+	}
+
+	return { bild: result.imageData };
+}
+
+/**
+ * Build a simple fallback prompt when GPT-5.1 is not available
+ */
+function buildFallbackPrompt(
+	szene: BildbandSzene,
+	kontext: SzenenKontext,
+	refCount: number,
+	sichtbareCharaktere: GenerierterBekannter[],
+	sichtbareBekannte: GenerierterBekannter[]
+): string {
+	// Build character descriptions - only for visible characters!
+	const allCharacters = [...sichtbareCharaktere, ...sichtbareBekannte];
+
+	// Handle scene with no characters (e.g., Scene 1 = just location)
+	const charakterBeschreibungen = allCharacters.length > 0
+		? allCharacters
+			.map((c, index) => {
+				const berufe = c.berufe.join(' and ');
+				const hasPortrait = c.bild ? ` (reference image ${index + 1})` : '';
+				return `${c.name}: ${c.geschlecht === 'weiblich' ? 'female' : 'male'} ${c.tier}, ${berufe}, ${c.merkmal.name}${hasPortrait}`;
+			})
+			.join('; ')
+		: 'NO CHARACTERS - show only the location/landscape!';
 
 	// Build region features
 	const regionFeatures: string[] = [];
@@ -557,37 +1082,32 @@ export async function generiereSzenenBild(
 		regionFeatures.push(kontext.aktuelleRegion.architektur.promptText);
 	}
 
-	// Add reference image instruction if we have portraits
-	const referenceInstruction = referenceImages.length > 0
-		? `\n\nIMPORTANT: Reference images are provided showing how each character should look. Use these as visual reference to maintain character consistency. The characters in your generated image should match the appearance shown in the reference portraits.`
+	const referenceInstruction = refCount > 0
+		? `\n\nIMPORTANT: Reference images show character appearances. Match them in the illustration.`
 		: '';
 
-	const prompt = `Create a colorful hand-drawn illustration in the style of Fritz Baumgarten (German children's book illustration, fairy-tale like, warm, detailed, watercolor-style). Do NOT include any text, labels, titles, or words in the image.
+	// Build character section - only if there are characters to show
+	const characterSection = allCharacters.length > 0
+		? `\nCHARACTERS (anthropomorphic animals in clothing):\n${charakterBeschreibungen}`
+		: `\nIMPORTANT: This is a LANDSCAPE-ONLY scene. Do NOT include any characters, people, or animals. Show ONLY the environment and location.`;
+
+	return `Create a colorful hand-drawn illustration in Fritz Baumgarten style (German children's book, fairy-tale, watercolor).
 
 SCENE: "${szene.reim}"
 
 LOCATION: ${kontext.aktuellerOrt.name} - ${kontext.aktuellerOrt.beschreibung}
-REGION FEATURES: ${regionFeatures.join(', ')}
+REGION: ${regionFeatures.join(', ')}
+${characterSection}
 
-CHARACTERS (anthropomorphic animals in clothing):
-${charakterBeschreibungen}
+Scene type: ${szene.titel} - ${szene.typ}
+Horizontal landscape, warm inviting colors.${referenceInstruction}
 
-The characters are doing what the rhyme describes. They should be visible and recognizable.
-Show them in this scene type: ${szene.titel} - ${szene.typ}
-
-Style: Fairy-tale German children's book illustration like Fritz Baumgarten.
-Horizontal landscape format with warm, inviting colors.${referenceInstruction}`;
-
-	console.log(`[Bildband] Generiere Bild für Szene ${szene.nummer} mit ${referenceImages.length} Referenzbildern...`);
-
-	const result = await callImageApi(prompt, apiKey, referenceImages.length > 0 ? referenceImages : undefined);
-
-	if (!result.success || !result.imageData) {
-		console.error(`[Bildband] Bild-Generierung fehlgeschlagen: ${result.error}`);
-		return { fehler: true };
-	}
-
-	return { bild: result.imageData };
+CRITICAL: ABSOLUTELY NO TEXT IN THE IMAGE!
+- No speech bubbles
+- No written words
+- No labels or letters
+- No signs with writing
+- Pure illustration only!`;
 }
 
 /**
@@ -608,13 +1128,10 @@ export async function generiereMetadaten(
 	szenen: BildbandSzene[],
 	charaktere: GenerierterBekannter[]
 ): Promise<{ titel: string; beschreibung: string }> {
-	const apiKey = await getApiKey();
-	if (!apiKey) throw new Error('Kein API Key vorhanden.');
-
 	const alleReime = szenen.map((s) => `${s.titel}: ${s.reim}`).join('\n\n');
 	const charakterNamen = charaktere.map((c) => c.name).join(', ');
 
-	const prompt = `Du bist ein Kinderbuch-Autor. Basierend auf dieser Geschichte mit den Charakteren ${charakterNamen}:
+	const prompt = `Basierend auf dieser Geschichte mit den Charakteren ${charakterNamen}:
 
 ${alleReime}
 
@@ -626,7 +1143,8 @@ Antworte im Format:
 TITEL: [Titel hier]
 BESCHREIBUNG: [Beschreibung hier]`;
 
-	const result = await callTextApi(prompt, apiKey);
+	const systemPrompt = `Du bist ein Kinderbuch-Autor für deutsche Märchen.`;
+	const result = await generateText(prompt, { systemPrompt, temperature: 0.7 });
 
 	if (!result.success || !result.text) {
 		// Fallback
@@ -803,7 +1321,19 @@ export async function generiereBildband(
 		bildband.storyPlan = storyPlan;
 		bildband.letzteAktualisierung = new Date().toISOString();
 		await saveCallback?.(bildband);
-		console.log(`[Bildband] Story-Plan: ${storyPlan.zusammenfassung}`);
+
+		// Detailed logging of story plan
+		console.log(`[Bildband] ========== STORY-PLAN ==========`);
+		console.log(`[Bildband] Zusammenfassung: ${storyPlan.zusammenfassung}`);
+		console.log(`[Bildband] Hauptkonflikt: ${storyPlan.hauptkonflikt}`);
+		console.log(`[Bildband] Moral: ${storyPlan.moral || 'keine'}`);
+		console.log(`[Bildband] --- SZENEN & CHARAKTERE ---`);
+		storyPlan.szenenPlaene.forEach((plan, i) => {
+			const chars = storyPlan!.charakterEinfuehrungen[i] || [];
+			console.log(`[Bildband] Szene ${i + 1}: ${plan.substring(0, 60)}...`);
+			console.log(`[Bildband]   -> Charaktere: ${chars.length > 0 ? chars.join(', ') : 'KEINE'}`);
+		});
+		console.log(`[Bildband] ================================`);
 	} catch (error) {
 		console.error('[Bildband] Story-Planung fehlgeschlagen, fahre ohne fort:', error);
 	}
@@ -818,13 +1348,25 @@ export async function generiereBildband(
 		szene.region = aktuelleRegion;
 		szene.ort = aktuellerOrt;
 
+		// Add scene to bildband IMMEDIATELY so UI can show it during generation
+		// IMPORTANT: Create NEW bildband object for Svelte reactivity!
+		const szenenIndex = bildband.szenen.length;
+		bildband = {
+			...bildband,
+			szenen: [...bildband.szenen, szene],
+			letzteAktualisierung: new Date().toISOString()
+		};
+		await saveCallback?.(bildband);
+
 		const kontext: SzenenKontext = {
 			charaktere,
+			bekannte,
 			aktuelleRegion,
 			aktuellerOrt,
 			zweiterOrt: effektiverZweiterOrt,
-			bisherigeSzenen: bildband.szenen,
-			szenenDefinition: definition
+			bisherigeSzenen: bildband.szenen.slice(0, szenenIndex), // Previous scenes only
+			szenenDefinition: definition,
+			storyPlan
 		};
 
 		// Generate rhyme
@@ -838,9 +1380,20 @@ export async function generiereBildband(
 
 		try {
 			szene.reim = await generiereReim(kontext, storyPlan, bekannte);
+			// Update scene in bildband array - create NEW object for Svelte reactivity
+			bildband = {
+				...bildband,
+				szenen: bildband.szenen.map((s, i) => i === szenenIndex ? { ...szene } : s),
+				letzteAktualisierung: new Date().toISOString()
+			};
+			await saveCallback?.(bildband);
 		} catch (error) {
 			console.error(`[Bildband] Fehler bei Reim ${definition.nummer}:`, error);
 			szene.reim = `Szene ${definition.nummer}: ${definition.titel}\n(Reim konnte nicht generiert werden)`;
+			bildband = {
+				...bildband,
+				szenen: bildband.szenen.map((s, i) => i === szenenIndex ? { ...szene } : s)
+			};
 		}
 
 		// Generate image
@@ -863,13 +1416,13 @@ export async function generiereBildband(
 			szene.bildFehler = true;
 		}
 
-		bildband.szenen = [...bildband.szenen, szene];
-		bildband.letzteAktualisierung = new Date().toISOString();
-
-		// Set cover image from first scene
-		if (definition.nummer === 1 && szene.bilder[0]) {
-			bildband.coverBild = szene.bilder[0];
-		}
+		// Update scene in bildband array with final state - create NEW object for Svelte reactivity
+		bildband = {
+			...bildband,
+			szenen: bildband.szenen.map((s, i) => i === szenenIndex ? { ...szene } : s),
+			letzteAktualisierung: new Date().toISOString(),
+			coverBild: definition.nummer === 1 && szene.bilder[0] ? szene.bilder[0] : bildband.coverBild
+		};
 
 		// Save after each scene
 		await saveCallback?.(bildband);
@@ -994,13 +1547,25 @@ export async function resumeBildband(
 		szene.region = aktuelleRegion;
 		szene.ort = aktuellerOrt;
 
+		// Add scene to bildband IMMEDIATELY so UI can show it during generation
+		// IMPORTANT: Create NEW bildband object for Svelte reactivity!
+		const szenenIndex = bildband.szenen.length;
+		bildband = {
+			...bildband,
+			szenen: [...bildband.szenen, szene],
+			letzteAktualisierung: new Date().toISOString()
+		};
+		await onSave?.(bildband);
+
 		const kontext: SzenenKontext = {
 			charaktere,
+			bekannte: bildband.bekannte,
 			aktuelleRegion,
 			aktuellerOrt,
 			zweiterOrt: effektiverZweiterOrt,
-			bisherigeSzenen: bildband.szenen,
-			szenenDefinition: definition
+			bisherigeSzenen: bildband.szenen.slice(0, szenenIndex), // Previous scenes only
+			szenenDefinition: definition,
+			storyPlan: effectiveStoryPlan
 		};
 
 		// Generate rhyme
@@ -1014,9 +1579,20 @@ export async function resumeBildband(
 
 		try {
 			szene.reim = await generiereReim(kontext, effectiveStoryPlan, bildband.bekannte);
+			// Update scene in bildband array - create NEW object for Svelte reactivity
+			bildband = {
+				...bildband,
+				szenen: bildband.szenen.map((s, i) => i === szenenIndex ? { ...szene } : s),
+				letzteAktualisierung: new Date().toISOString()
+			};
+			await onSave?.(bildband);
 		} catch (error) {
 			console.error(`[Bildband] Resume: Fehler bei Reim ${definition.nummer}:`, error);
 			szene.reim = `Szene ${definition.nummer}: ${definition.titel}\n(Reim konnte nicht generiert werden)`;
+			bildband = {
+				...bildband,
+				szenen: bildband.szenen.map((s, i) => i === szenenIndex ? { ...szene } : s)
+			};
 		}
 
 		// Generate image
@@ -1039,13 +1615,13 @@ export async function resumeBildband(
 			szene.bildFehler = true;
 		}
 
-		bildband.szenen = [...bildband.szenen, szene];
-		bildband.letzteAktualisierung = new Date().toISOString();
-
-		// Set cover image from first scene if not set
-		if (!bildband.coverBild && definition.nummer === 1 && szene.bilder[0]) {
-			bildband.coverBild = szene.bilder[0];
-		}
+		// Update scene in bildband array with final state - create NEW object for Svelte reactivity
+		bildband = {
+			...bildband,
+			szenen: bildband.szenen.map((s, i) => i === szenenIndex ? { ...szene } : s),
+			letzteAktualisierung: new Date().toISOString(),
+			coverBild: !bildband.coverBild && definition.nummer === 1 && szene.bilder[0] ? szene.bilder[0] : bildband.coverBild
+		};
 
 		await onSave?.(bildband);
 	}
@@ -1095,6 +1671,7 @@ export async function regeneriereSzene(
 
 	const kontext: SzenenKontext = {
 		charaktere: bildband.charaktere,
+		bekannte: bildband.bekannte,
 		aktuelleRegion: istNachOrtswechsel
 			? bildband.zweiterOrt?.region || bildband.startRegion
 			: bildband.startRegion,
@@ -1104,6 +1681,7 @@ export async function regeneriereSzene(
 		zweiterOrt: bildband.zweiterOrt,
 		bisherigeSzenen: bildband.szenen.slice(0, szeneIndex),
 		szenenDefinition: definition,
+		storyPlan: bildband.storyPlan,
 		userAnmerkung: anmerkung
 	};
 
@@ -1150,6 +1728,7 @@ export async function regeneriereNurReim(
 
 	const kontext: SzenenKontext = {
 		charaktere: bildband.charaktere,
+		bekannte: bildband.bekannte,
 		aktuelleRegion: istNachOrtswechsel
 			? bildband.zweiterOrt?.region || bildband.startRegion
 			: bildband.startRegion,
@@ -1159,6 +1738,7 @@ export async function regeneriereNurReim(
 		zweiterOrt: bildband.zweiterOrt,
 		bisherigeSzenen: bildband.szenen.slice(0, szeneIndex),
 		szenenDefinition: definition,
+		storyPlan: bildband.storyPlan,
 		userAnmerkung: anmerkung
 	};
 
